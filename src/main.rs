@@ -1,5 +1,7 @@
-#[allow(unused_imports)]
+mod builtin;
 use std::io::{self, Write};
+
+use crate::builtin::exit;
 
 fn main() {
     loop {
@@ -8,8 +10,17 @@ fn main() {
 
         let mut command = String::new();
         io::stdin().read_line(&mut command).unwrap();
+        let command = command.trim();
 
-        print!("{}: command not found\n", command.trim());
-        io::stdout().flush().unwrap();
+        match command {
+            "exit" => {
+                exit();
+            }
+            unknown_command => {
+                print!("{}: command not found\n", unknown_command);
+                io::stdout().flush().unwrap();
+            }
+        }
+        
     }
 }
