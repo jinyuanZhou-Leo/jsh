@@ -19,6 +19,13 @@ fn main() {
             "echo" => {
                 echo(command[1..].join(" "));
             }
+            "type" => {
+                if vec!["exit", "echo", "type"].contains(&command[1]) {
+                    println!("{} is a shell builtin", command[1]);
+                } else {
+                    println!("{}: not found", command[1]);
+                }
+            }
             unknown_command => {
                 print!("{}: command not found\n", unknown_command);
                 io::stdout().flush().unwrap();
