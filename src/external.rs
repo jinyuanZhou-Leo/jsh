@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, path::PathBuf};
+use std::{collections::HashMap, env, os::unix::fs::PermissionsExt, path::PathBuf};
 
 #[derive(Default)]
 pub(crate) struct CommandLoader {
@@ -24,7 +24,12 @@ impl CommandLoader {
             let candidate = dir.join(cmd);
 
             if candidate.is_file() {
-                return Some(candidate);
+                if let Ok(metadata) = candidate.metadata(){
+                    // 用位运算判断执行权限 001 001 001
+                    if metadata.is_file() && (metadata.permissions().mode() & 0o111 == 1){
+                        return Some(candidate);
+                    }
+                }
             }
         }
 
