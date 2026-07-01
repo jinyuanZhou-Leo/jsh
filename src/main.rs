@@ -1,35 +1,25 @@
 mod builtin;
-use std::io::{self, Write};
+mod external;
+mod shell;
+use std::{collections::HashMap, env, path::Path};
 
-use crate::builtin::{echo, exit};
+use crate::shell::Shell;
 
 fn main() {
-    loop {
-        print!("$ ");
-        io::stdout().flush().unwrap();
-
-        let mut command = String::new();
-        io::stdin().read_line(&mut command).unwrap();
-        let command: Vec<&str> = command.trim().split(' ').collect();
-
-        match command[0] {
-            "exit" => {
-                exit();
-            }
-            "echo" => {
-                echo(command[1..].join(" "));
-            }
-            "type" => {
-                if vec!["exit", "echo", "type"].contains(&command[1]) {
-                    println!("{} is a shell builtin", command[1]);
-                } else {
-                    println!("{}: not found", command[1]);
-                }
-            }
-            unknown_command => {
-                print!("{}: command not found\n", unknown_command);
-                io::stdout().flush().unwrap();
-            }
-        }
+    let mut env_vars = HashMap::new();
+    for (k, v) in env::vars() {
+        env_vars.insert(k, v);
     }
+
+    let mut shell = Shell::new(
+        Path::new("./"),
+        env_vars,
+        [
+            ("exit", builtin::exit),
+            ("echo", builtin::echo),
+            ("type", builtin::type_command),
+        ],
+    );
+
+    shell.run();
 }
