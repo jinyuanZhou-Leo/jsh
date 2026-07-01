@@ -26,7 +26,7 @@ impl CommandLoader {
             if candidate.is_file() {
                 if let Ok(metadata) = candidate.metadata(){
                     // 用位运算判断执行权限 001 001 001
-                    if metadata.is_file() && (metadata.permissions().mode() & 0o111 == 1){
+                    if metadata.is_file() && (metadata.permissions().mode() & 0o111 != 0){
                         return Some(candidate);
                     }
                 }
