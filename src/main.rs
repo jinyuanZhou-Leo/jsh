@@ -1,7 +1,7 @@
 mod builtin;
 mod external;
 mod shell;
-use std::{collections::HashMap, env, path::Path};
+use std::{collections::HashMap, env};
 
 use crate::shell::Shell;
 
@@ -12,12 +12,13 @@ fn main() {
     }
 
     let mut shell = Shell::new(
-        Path::new("./"),
+        env::current_dir().unwrap(),
         env_vars,
         [
             ("exit", builtin::exit),
             ("echo", builtin::echo),
             ("type", builtin::type_command),
+            ("pwd", builtin::pwd)
         ],
     );
 

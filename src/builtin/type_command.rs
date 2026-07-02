@@ -1,7 +1,6 @@
 use crate::shell::{BuiltinResult, Shell};
 
 pub fn type_command(shell: &mut Shell, argv: &[String]) -> BuiltinResult {
-    let argv = &argv[1..];
     match argv {
         [command] => {
             if let Some(_builtin) = shell.builtin().get(command) {

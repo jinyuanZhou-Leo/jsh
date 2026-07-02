@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap, io::{self, Write}, path::{Path, PathBuf}, process::{self, Command}, sync::mpsc, thread::{self, spawn},
+    collections::HashMap, io::{self, Write}, os::unix::process::CommandExt, path::{Path, PathBuf}, process::{self, Command}, sync::mpsc, thread::{self, spawn},
 };
 
 use crate::external::CommandLoader;
@@ -86,7 +86,7 @@ impl Shell {
         }
 
         let cmd = &args[0];
-        let argv = &args[0..];
+        let argv = &args[1..];
 
         if let Some(builtin) = self.builtin().get(cmd) {
             let code = builtin(self, argv).code;
@@ -94,7 +94,7 @@ impl Shell {
             code
         } else {
             if let Some(dir) = self.command_loader().find_executable(&cmd) {
-                match Command::new(dir.file_name().unwrap()).args(&argv[1..]).status(){
+                match Command::new(&dir).arg0(&cmd).args(&argv[..]).status(){
                     Ok(exit_status) =>{
                         exit_status.code().unwrap()
                     },
