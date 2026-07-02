@@ -94,7 +94,7 @@ impl Shell {
             code
         } else {
             if let Some(dir) = self.command_loader().find_executable(&cmd) {
-                match Command::new(dir).args(&argv[..]).status(){
+                match Command::new(dir).args(&argv[1..]).status(){
                     Ok(exit_status) =>{
                         exit_status.code().unwrap()
                     },
