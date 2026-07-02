@@ -1,5 +1,7 @@
 use std::{collections::HashMap, env, os::unix::fs::PermissionsExt, path::PathBuf};
 
+use is_executable::IsExecutable;
+
 #[derive(Default)]
 pub(crate) struct CommandLoader {
     path: Vec<PathBuf>,
@@ -23,13 +25,8 @@ impl CommandLoader {
         for dir in &self.path {
             let candidate = dir.join(cmd);
 
-            if candidate.is_file() {
-                if let Ok(metadata) = candidate.metadata(){
-                    // 用位运算判断执行权限 001 001 001
-                    if metadata.is_file() && (metadata.permissions().mode() & 0o111 != 0){
-                        return Some(candidate);
-                    }
-                }
+            if candidate.is_file() && candidate.is_executable() {
+                return Some(candidate);
             }
         }
 

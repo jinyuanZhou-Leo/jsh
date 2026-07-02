@@ -1,8 +1,5 @@
 use std::{
-    collections::HashMap,
-    io::{self, Write},
-    path::{Path, PathBuf},
-    process,
+    collections::HashMap, io::{self, Write}, path::{Path, PathBuf}, process::{self, Command}, sync::mpsc, thread::{self, spawn},
 };
 
 use crate::external::CommandLoader;
@@ -89,15 +86,28 @@ impl Shell {
         }
 
         let cmd = &args[0];
-        let argv = &args[1..];
+        let argv = &args[0..];
 
         if let Some(builtin) = self.builtin().get(cmd) {
             let code = builtin(self, argv).code;
             self.status = code;
             code
         } else {
-            println!("{cmd}: command not found");
-            1
+            if let Some(dir) = self.command_loader().find_executable(&cmd) {
+                match Command::new(dir).args(argv[1..].iter()).status(){
+                    Ok(exit_status) =>{
+                        exit_status.code().unwrap()
+                    },
+                    Err(err) =>{
+                        eprintln!("Error occurred while invoking external command: {err}");
+                        1
+                    }
+                }
+            }
+            else{
+                println!("{cmd}: command not found");
+                1
+            }
         }
     }
 }
