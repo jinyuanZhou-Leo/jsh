@@ -38,10 +38,8 @@ fn resolve_cd_path(shell: &Shell, dir: &str) -> Result<PathBuf, Box<dyn Error>> 
     let dir = if dir.starts_with('~') {
         expand_tilde(shell, dir)?
     } else {
-        dir.to_owned()
+        PathBuf::from(dir)
     };
-
-    let dir = PathBuf::from(dir);
 
     let dir = if dir.is_absolute() {
         dir
