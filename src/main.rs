@@ -18,7 +18,8 @@ fn main() {
             ("exit", builtin::exit),
             ("echo", builtin::echo),
             ("type", builtin::type_command),
-            ("pwd", builtin::pwd)
+            ("pwd", builtin::pwd),
+            ("cd", builtin::cd)
         ],
     );
 

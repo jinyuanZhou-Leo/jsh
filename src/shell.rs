@@ -47,6 +47,10 @@ impl Shell {
         self.pwd.as_path()
     }
 
+    pub fn set_pwd(&mut self, path: impl Into<PathBuf>){
+        self.pwd = path.into();
+    }
+
     pub fn env_vars(&self) -> &HashMap<String, String> {
         &self.env_vars
     }
