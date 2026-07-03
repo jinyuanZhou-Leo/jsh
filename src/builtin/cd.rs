@@ -47,7 +47,10 @@ fn resolve_cd_path(shell: &Shell, dir: &str) -> Result<PathBuf, Box<dyn Error>> 
         shell.pwd().join(dir)
     };
 
-    let dir = dir.canonicalize()?; // canonical同时也检查了是否存在
+    let dir = match dir.canonicalize() {
+        Ok(dir)=>dir,
+        Err(_) => return Err("No such file or directory".into())
+    }; // canonical同时也检查了是否存在
 
     if !dir.is_dir() {
         return Err("Not a directory".into());
