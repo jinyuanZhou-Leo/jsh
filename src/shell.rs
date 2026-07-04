@@ -1,15 +1,46 @@
 use std::{
-    collections::HashMap, error::Error, io::{self, Write}, os::unix::process::CommandExt, path::{self, Path, PathBuf}, process::{self, Command},
+    collections::HashMap,
+    error::Error,
+    fmt,
+    io::{self, Write},
+    os::unix::process::CommandExt,
+    path::{Path, PathBuf},
+    process::{self, Command},
 };
-use crate::{external::CommandLoader, shell};
+
+use crate::external::CommandLoader;
 
 /// Shell: shell context
 /// &[String]: command arguments
-pub type BuiltinFn = fn(&mut Shell, &[String]) -> BuiltinResult;
+pub type BuiltinFn = fn(&mut Shell, &[String]) -> BuiltinOutput;
+pub type BuiltinOutput = Result<BuiltinResult, BuiltinError>;
 
 pub struct BuiltinResult {
     pub code: i32,
 }
+
+#[derive(Debug)]
+pub struct BuiltinError {
+    pub code: i32,
+    pub message: String,
+}
+
+impl BuiltinError {
+    pub fn new(code: i32, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for BuiltinError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl Error for BuiltinError {}
 
 #[derive(Default)]
 pub struct Shell {
@@ -46,7 +77,7 @@ impl Shell {
         self.pwd.as_path()
     }
 
-    pub fn set_pwd(&mut self, path: impl Into<PathBuf>){
+    pub fn set_pwd(&mut self, path: impl Into<PathBuf>) {
         self.pwd = path.into();
     }
 
@@ -67,7 +98,7 @@ impl Shell {
         self.exit_code = code;
     }
 
-    pub fn run(&mut self){
+    pub fn run(&mut self) {
         while !self.should_exit {
             print!("$ ");
             io::stdout().flush().unwrap();
@@ -78,7 +109,7 @@ impl Shell {
             match self.parse_line(command_line.trim_end().into()) {
                 Ok(line) => {
                     let _status = self.eval_line(&line);
-                },
+                }
                 Err(e) => {
                     eprintln!("Could not parse line because: {e}");
                 }
@@ -99,29 +130,32 @@ impl Shell {
         let argv = &args[1..];
 
         if let Some(builtin) = self.builtin().get(cmd) {
-            let code = builtin(self, argv).code;
+            let code = match builtin(self, argv) {
+                Ok(result) => result.code,
+                Err(err) => {
+                    eprintln!("{err}");
+                    err.code
+                }
+            };
             self.status = code;
             code
         } else {
             if let Some(dir) = self.command_loader().find_executable(&cmd) {
-                match Command::new(&dir).arg0(&cmd).args(&argv[..]).status(){
-                    Ok(exit_status) =>{
-                        exit_status.code().unwrap()
-                    },
-                    Err(err) =>{
+                match Command::new(&dir).arg0(&cmd).args(&argv[..]).status() {
+                    Ok(exit_status) => exit_status.code().unwrap(),
+                    Err(err) => {
                         eprintln!("Error occurred while invoking external command: {err}");
                         1
                     }
                 }
-            }
-            else{
+            } else {
                 println!("{cmd}: command not found");
                 1
             }
         }
     }
 
-    fn parse_line(&self, line: String) -> Result<String, Box<dyn Error>>{
+    fn parse_line(&self, line: String) -> Result<String, Box<dyn Error>> {
         let line = self.expand_tilde(line)?;
         // TODO: more expansion
 
@@ -135,5 +169,4 @@ impl Shell {
 
         Ok(line.replace('~', home_dir))
     }
-
 }

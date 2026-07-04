@@ -1,6 +1,6 @@
-use crate::shell::{BuiltinResult, Shell};
+use crate::shell::{BuiltinOutput, BuiltinResult, Shell};
 
-pub fn echo(_shell: &mut Shell, argv: &[String]) -> BuiltinResult {
+pub fn echo(_shell: &mut Shell, argv: &[String]) -> BuiltinOutput {
     println!("{}", argv.join(" "));
-    BuiltinResult { code: 0 }
+    Ok(BuiltinResult { code: 0 })
 }

@@ -1,6 +1,6 @@
-use crate::shell::{BuiltinResult, Shell};
+use crate::shell::{BuiltinOutput, BuiltinResult, Shell};
 
-pub fn exit(shell: &mut Shell, _argv: &[String]) -> BuiltinResult {
+pub fn exit(shell: &mut Shell, _argv: &[String]) -> BuiltinOutput {
     shell.exit(0);
-    BuiltinResult { code: 0 }
+    Ok(BuiltinResult { code: 0 })
 }

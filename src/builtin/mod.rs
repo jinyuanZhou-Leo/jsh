@@ -1,11 +1,11 @@
+mod cd;
 mod echo;
 mod exit;
-mod type_command;
 mod pwd;
-mod cd;
+mod type_command;
 
+pub use cd::cd;
 pub use echo::echo;
 pub use exit::exit;
-pub use type_command::type_command;
 pub use pwd::pwd;
-pub use cd::cd;
+pub use type_command::type_command;

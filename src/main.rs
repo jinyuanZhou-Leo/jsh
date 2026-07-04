@@ -19,7 +19,7 @@ fn main() {
             ("echo", builtin::echo),
             ("type", builtin::type_command),
             ("pwd", builtin::pwd),
-            ("cd", builtin::cd)
+            ("cd", builtin::cd),
         ],
     );
 

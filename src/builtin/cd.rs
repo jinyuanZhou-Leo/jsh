@@ -1,27 +1,18 @@
 use std::{error::Error, path::PathBuf};
 
-use crate::shell::{BuiltinResult, Shell};
+use crate::shell::{BuiltinError, BuiltinOutput, BuiltinResult, Shell};
 
-pub fn cd(shell: &mut Shell, argv: &[String]) -> BuiltinResult {
+pub fn cd(shell: &mut Shell, argv: &[String]) -> BuiltinOutput {
     match argv {
         [dir] => match resolve_cd_path(shell, dir) {
             Ok(new_path) => {
                 shell.set_pwd(new_path);
-                BuiltinResult { code: 0 }
+                Ok(BuiltinResult { code: 0 })
             }
-            Err(e) => {
-                println!("cd: {}: {}", dir, e);
-                BuiltinResult { code: 1 }
-            }
+            Err(e) => Err(BuiltinError::new(1, format!("cd: {}: {}", dir, e))),
         },
-        [] => {
-            println!("cd: missing operand");
-            BuiltinResult { code: 1 }
-        }
-        _ => {
-            println!("cd: too many arguments");
-            BuiltinResult { code: 1 }
-        }
+        [] => Err(BuiltinError::new(1, "cd: missing operand")),
+        _ => Err(BuiltinError::new(1, "cd: too many arguments")),
     }
 }
 
@@ -48,8 +39,8 @@ fn resolve_cd_path(shell: &Shell, dir: &str) -> Result<PathBuf, Box<dyn Error>> 
     };
 
     let dir = match dir.canonicalize() {
-        Ok(dir)=>dir,
-        Err(_) => return Err("No such file or directory".into())
+        Ok(dir) => dir,
+        Err(_) => return Err("No such file or directory".into()),
     }; // canonical同时也检查了是否存在
 
     if !dir.is_dir() {
