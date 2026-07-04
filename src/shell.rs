@@ -1,8 +1,7 @@
 use std::{
-    collections::HashMap, io::{self, Write}, os::unix::process::CommandExt, path::{Path, PathBuf}, process::{self, Command}, sync::mpsc, thread::{self, spawn},
+    collections::HashMap, error::Error, io::{self, Write}, os::unix::process::CommandExt, path::{self, Path, PathBuf}, process::{self, Command},
 };
-
-use crate::external::CommandLoader;
+use crate::{external::CommandLoader, shell};
 
 /// Shell: shell context
 /// &[String]: command arguments
@@ -68,7 +67,7 @@ impl Shell {
         self.exit_code = code;
     }
 
-    pub fn run(&mut self) {
+    pub fn run(&mut self){
         while !self.should_exit {
             print!("$ ");
             io::stdout().flush().unwrap();
@@ -76,7 +75,14 @@ impl Shell {
             let mut command_line = String::new();
             io::stdin().read_line(&mut command_line).unwrap();
 
-            let _status = self.eval_line(command_line.trim_end());
+            match self.parse_line(command_line.trim_end().into()) {
+                Ok(line) => {
+                    let _status = self.eval_line(&line);
+                },
+                Err(e) => {
+                    eprintln!("Could not parse line because: {e}");
+                }
+            };
         }
 
         process::exit(self.exit_code);
@@ -114,4 +120,20 @@ impl Shell {
             }
         }
     }
+
+    fn parse_line(&self, line: String) -> Result<String, Box<dyn Error>>{
+        let line = self.expand_tilde(line)?;
+        // TODO: more expansion
+
+        Ok(line)
+    }
+
+    fn expand_tilde(&self, line: String) -> Result<String, Box<dyn Error>> {
+        let Some(home_dir) = self.env_vars().get("HOME") else {
+            return Err("Could not find env var 'HOME'".into());
+        };
+
+        Ok(line.replace('~', home_dir))
+    }
+
 }
