@@ -106,8 +106,8 @@ impl Shell {
             let mut line = String::new();
             io::stdin().read_line(&mut line).unwrap();
 
-            let line = line.trim_end();
-            
+            let line = line.trim_end(); // 把命令末尾换行符裁切掉
+
             // Step 1: Lex
             let lexer = Lexer::new();
             let line = match lexer.lex(&line) {

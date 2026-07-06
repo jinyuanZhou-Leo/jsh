@@ -12,7 +12,7 @@ impl CommandLoader {
     pub fn new(env_vars: &HashMap<String, String>) -> Self {
         let path: Vec<PathBuf> = env_vars
             .get("PATH")
-            // 跨平台写法
+            // 用split_path来支持跨平台
             .map(|val| env::split_paths(val).collect())
             .unwrap_or_default();
         Self {
