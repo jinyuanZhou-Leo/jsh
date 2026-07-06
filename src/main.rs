@@ -1,8 +1,9 @@
 mod builtin;
-mod expender;
+mod expander;
 mod external;
 mod lexer;
 mod shell;
+mod parser;
 use std::{collections::HashMap, env};
 
 use crate::shell::Shell;

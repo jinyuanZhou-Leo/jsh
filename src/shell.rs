@@ -8,7 +8,7 @@ use std::{
     process::{self, Command},
 };
 
-use crate::{expender::Expander, external::CommandLoader, lexer::Lexer};
+use crate::{expander::Expander, external::CommandLoader, lexer::Lexer};
 
 /// Shell: shell context
 /// &[String]: command arguments
