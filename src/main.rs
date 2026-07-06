@@ -1,5 +1,7 @@
 mod builtin;
+mod expender;
 mod external;
+mod lexer;
 mod shell;
 use std::{collections::HashMap, env};
 

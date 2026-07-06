@@ -8,7 +8,7 @@ use std::{
     process::{self, Command},
 };
 
-use crate::external::CommandLoader;
+use crate::{expender::Expander, external::CommandLoader, lexer::Lexer};
 
 /// Shell: shell context
 /// &[String]: command arguments
@@ -103,32 +103,46 @@ impl Shell {
             print!("$ ");
             io::stdout().flush().unwrap();
 
-            let mut command_line = String::new();
-            io::stdin().read_line(&mut command_line).unwrap();
+            let mut line = String::new();
+            io::stdin().read_line(&mut line).unwrap();
 
-            match self.parse_line(command_line.trim_end().into()) {
-                Ok(line) => {
-                    let _status = self.eval_line(&line);
-                }
+            let line = line.trim_end();
+            
+            // Step 1: Lex
+            let lexer = Lexer::new();
+            let line = match lexer.lex(&line) {
+                Ok(lexed) => lexed,
                 Err(e) => {
-                    eprintln!("Could not parse line because: {e}");
+                    eprintln!("Error occurred while lexing: {e}");
+                    return;
                 }
             };
+
+            // Step 2: Expand
+            let expander = Expander::new();
+            let line = match expander.expand(self, line) {
+                Ok(expanded) => expanded,
+                Err(e) => {
+                    eprintln!("Error occurred while expanding: {e}");
+                    return;
+                }
+            };
+
+            let _status = self.eval_line(line);
         }
 
         process::exit(self.exit_code);
     }
 
-    fn eval_line(&mut self, line: &str) -> i32 {
-        let args: Vec<String> = line.split_whitespace().map(|x| x.to_string()).collect();
-
-        if args.is_empty() {
+    fn eval_line(&mut self, line: Vec<String>) -> i32 {
+        if line.is_empty() {
             return 0;
         }
 
-        let cmd = &args[0];
-        let argv = &args[1..];
+        let cmd = &line[0];
+        let argv = &line[1..];
 
+        //先匹配 builtin command
         if let Some(builtin) = self.builtin().get(cmd) {
             let code = match builtin(self, argv) {
                 Ok(result) => result.code,
@@ -138,35 +152,22 @@ impl Shell {
                 }
             };
             self.status = code;
-            code
-        } else {
-            if let Some(dir) = self.command_loader().find_executable(&cmd) {
-                match Command::new(&dir).arg0(&cmd).args(&argv[..]).status() {
-                    Ok(exit_status) => exit_status.code().unwrap(),
-                    Err(err) => {
-                        eprintln!("Error occurred while invoking external command: {err}");
-                        1
-                    }
-                }
-            } else {
-                println!("{cmd}: command not found");
-                1
-            }
+            return code
         }
-    }
 
-    fn parse_line(&self, line: String) -> Result<String, Box<dyn Error>> {
-        let line = self.expand_tilde(line)?;
-        // TODO: more expansion
-
-        Ok(line)
-    }
-
-    fn expand_tilde(&self, line: String) -> Result<String, Box<dyn Error>> {
-        let Some(home_dir) = self.env_vars().get("HOME") else {
-            return Err("Could not find env var 'HOME'".into());
-        };
-
-        Ok(line.replace('~', home_dir))
+        // 再寻找 executable
+        if let Some(dir) = self.command_loader().find_executable(&cmd) {
+            match Command::new(&dir).arg0(&cmd).args(&argv[..]).status() {
+                Ok(exit_status) => return exit_status.code().unwrap(),
+                Err(err) => {
+                    eprintln!("Error occurred while invoking external command: {err}");
+                    return 1;
+                }
+            }
+        } 
+            
+        println!("{cmd}: command not found");
+        return 1;
+        
     }
 }

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, os::unix::fs::PermissionsExt, path::PathBuf};
+use std::{collections::HashMap, env, path::PathBuf};
 
 use is_executable::IsExecutable;
 
