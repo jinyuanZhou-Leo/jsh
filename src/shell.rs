@@ -114,7 +114,7 @@ impl Shell {
                 Ok(lexed) => lexed,
                 Err(e) => {
                     eprintln!("Error occurred while lexing: {e}");
-                    return;
+                    continue;
                 }
             };
 
@@ -124,7 +124,7 @@ impl Shell {
                 Ok(expanded) => expanded,
                 Err(e) => {
                     eprintln!("Error occurred while expanding: {e}");
-                    return;
+                    continue;
                 }
             };
 
