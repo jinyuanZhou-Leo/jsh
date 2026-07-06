@@ -98,6 +98,20 @@ impl Lexer {
                             WordPartKind::DoubleQuoted,
                         );
                         state_stack.pop();
+                    },
+                    '\\' => {
+                        match input.peek() {
+                            Some('\"'|'\\'|'$'|'`'|'\n') => {
+                                let next_ch = input.next().unwrap(); // SAFTY: 此处已经通过peek偷看过下一个字符, 该情况中下一个字符一定存在，因此可以安全的unwrap
+                                part_text.push(next_ch); // 正常消费下一个元素
+                            },
+                            Some(c) => {
+                                part_text.push('\\'); //下一个元素不能转义，则backslash在此处被当作字面量
+                            }
+                            None => {
+                                part_text.push('\\'); //不存在下一个元素，当作字面量处理
+                            }
+                        }
                     }
                     ch => {
                         part_text.push(ch);
