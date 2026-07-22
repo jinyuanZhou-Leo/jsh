@@ -1,153 +1,165 @@
-use std::{error::Error};
+use std::{iter::Peekable, vec::IntoIter};
 
-use crate::lexer::{Token, Word, WordPart};
+use thiserror::Error;
+
+use crate::lexer::{RedirectOperator, Token, Word};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum Redirection {
-    Input {
-        fd: u32,
-        target: Word,
-    },
-
-    Output {
-        fd: u32,
-        target: Word,
-    },
+struct Redirection {
+    fd: u32,
+    operator: RedirectOperator,
+    target: Word
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum Ast{
-    Command{
+enum Ast {
+    Command {
         args: Vec<Word>,
-        redirection: Vec<Redirection>
+        redirection: Vec<Redirection>,
     },
-    AndIf{
+    AndIf {
         left: Box<Ast>,
-        right: Box<Ast>
-    }
+        right: Box<Ast>,
+    },
 }
 
-pub struct Parser{
-    tokens: Vec<Token>,
-    pos: usize
+pub struct Parser {
+    tokens: Peekable<IntoIter<Token>>,
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self{
-        Self{tokens, pos: 0}
+    pub fn new(tokens: Vec<Token>) -> Self {
+        Self {
+            tokens: tokens.into_iter().peekable(),
+        }
     }
 
-    pub fn parse(&mut self) -> Result<Ast, Box<dyn Error>> {
-        let command = self.parse_command()?;
-        Ok(command)
+    // Parser是一次性对象，所有消费自身所有权
+    pub fn parse(mut self) -> Result<Option<Ast>, ParserError> {
+        // 如果Token为空则直接返回Ok(None)
+        if self.tokens.peek().is_none() {
+            return Ok(None);
+        }
+
+        let ast = self.parse_and_if()?;
+
+        // 检查是否存在parser未消费的剩余Token
+        if let Some(token) = self.tokens.peek() {
+            return Err(ParserError::UnexpectedToken(token.clone()));
+        }
+
+        Ok(Some(ast))
     }
 
-    fn parse_command(&mut self) -> Result<Ast, Box<dyn Error>> {
-        let mut command_buf = Vec::with_capacity(2);
-        let mut redirection_buf = Vec::with_capacity(2);
+    fn parse_command(&mut self) -> Result<Ast, ParserError> {
+        let mut command = Vec::new();
+        let mut redirections = Vec::new();
+
         loop {
-            match self.peek() {
-                Token::Word(word) => {
-                    let Token::Word(word) = self.next() else {
-                        return Err(format!("Error occurred while parsing word").into());
+            match self.tokens.peek() {
+                Some(Token::Word(_)) => {
+                    let Some(Token::Word(word)) = self.tokens.next() else {
+                        unreachable!("peek confirmed that the next token exists")
                     };
-                    command_buf.push(word);
-                }, 
-                Token::IoNumber(_)| Token::RedirectOut | Token::RedirectIn => {
-                    self.next(); //消费当前Token
-                    let redirection = self.parse_redirection()?;
-                    redirection_buf.push(redirection);
-                },
-                Token::AndIf => {
-                    unreachable!();
+                    command.push(word);
                 }
-                Token::Eof => {
-                    return Ok(Ast::Command { args: command_buf, redirection: redirection_buf })
+                Some(Token::IoNumber(_) | Token::Redirect(_)) => {
+                    redirections.push(self.parse_redirection()?);
                 }
-                token => {
-                    return Err(format!("Unexpected Token, found {token:?}").into())
+                // 当遇到 Token::AndAnd说明当前Command已经结束
+                Some(Token::AndAnd) | None => {
+                    break;
                 }
             }
         }
+
+        // command 为空是合法的, 因为command有可能来源于未解析的重定向输入
+        if command.is_empty() && redirections.is_empty() {
+            return Err(ParserError::ExpectCommand);
+        }
+
+        Ok(Ast::Command {
+            args: command,
+            redirection: redirections,
+        })
     }
 
-    fn parse_redirection(&mut self) -> Result<Redirection, Box<dyn Error>> {
-        let fd: u32 = match self.current().clone(){
-            Token::IoNumber(fd) => {
-                self.next(); //消费IoNumber
+    fn parse_redirection(&mut self) -> Result<Redirection, ParserError> {
+        let fd = match self.tokens.peek() {
+            Some(Token::IoNumber(_)) => {
+                let Some(Token::IoNumber(fd)) = self.tokens.next() else {
+                    unreachable!("peek confirmed that the next token exists")
+                };
+
                 fd
-            },
-            //非IoNumber不消费，只处理
-            Token::RedirectIn => 0,
-            Token::RedirectOut => 1,
-            token => {
-                return Err(format!("Expected redirection, but found {token:?}").into());
+            }
+            Some(Token::Redirect(operator)) => operator.default_fd(),
+            Some(_) | None => {
+                unreachable!(
+                    "peek confirmed that the next token exists and must be either IoNumber or Redirect"
+                );
             }
         };
 
-        let operator = match self.current().clone(){
-            Token::RedirectIn => Token::RedirectIn,
-            Token::RedirectOut => Token::RedirectOut,
-            token => {
-                return Err(format!("Expected redirect operator, but found {token:?}").into());
+        let operator = match self.tokens.next() {
+            Some(Token::Redirect(operator)) => operator,
+            Some(token) => {
+                return Err(ParserError::ExpectRedirectOperator { found: Some(token) });
+            }
+            None => {
+                return Err(ParserError::ExpectRedirectOperator { found: None });
             }
         };
 
-        let target = match self.next(){
-            Token::Word(word) => word,
-            Token::Eof => {
-                return Err(format!("Expected file after redirection").into());
+        let target = match self.tokens.next() {
+            Some(Token::Word(word)) => word,
+            Some(token) => {
+                return Err(ParserError::ExpectRedirectTarget { found: Some(token) });
             }
-            token => {
-                return Err(format!("Expected file, but found {token:?}").into());
+            None => {
+                return Err(ParserError::ExpectRedirectTarget { found: None });
             }
         };
 
-        match operator {
-            Token::RedirectIn => {
-                Ok(Redirection::Input { fd, target })
-            },
-            Token::RedirectOut => {
-                Ok(Redirection::Output { fd, target })
-            },
-            _ => unreachable!() //SAFTY: operator定义处已经处理过错误，此处不可能出现类型不符合In, Out的问题
-        }
+
+        Ok(Redirection { fd, operator, target })
     }
 
-    fn parse_and_or(&mut self) -> Result<Ast, Box<dyn Error>>{
+    fn parse_and_if(&mut self) -> Result<Ast, ParserError> {
+        // 先解析左侧命令
         let mut left = self.parse_command()?;
 
-        while matches!(*self.peek(), Token::AndIf) {
-            self.next();
+        // 如果发现了Token::AndAnd则递归解析
+        while matches!(self.tokens.peek(), Some(Token::AndAnd)) {
+            self.tokens.next(); // 消费 Token::AndAnd
+
+            // 检查Token::AndAnd之后是否存在命令
+            if self.tokens.peek().is_none() {
+                return Err(ParserError::MissingCommandAfterAndIf);
+            }
+
+            //解析右侧命令
             let right = self.parse_command()?;
-            left = Ast::AndIf { 
-                left: Box::new(left), 
-                right: Box::new(right) 
+            left = Ast::AndIf {
+                left: Box::new(left),
+                right: Box::new(right),
             };
         }
 
         Ok(left)
     }
+}
 
-    fn advance(&mut self) {
-        if !matches!(self.peek(), Token::Eof){
-            self.pos += 1;
-        }
-    }
-
-    fn next(&mut self) -> Token {
-        let next_token = self.peek().clone();
-
-        self.advance();
-
-        next_token
-    }
-    
-    fn current(&self) -> &Token {
-        &self.tokens[self.pos]
-    }
-
-    fn peek(&self) -> &Token {
-        &self.tokens[self.pos + 1]
-    }
+#[derive(Debug, Error, PartialEq, Eq)]
+pub(crate) enum ParserError {
+    #[error("unexpected token: `{0:?}`")]
+    UnexpectedToken(Token),
+    #[error("missing command after &&")]
+    MissingCommandAfterAndIf,
+    #[error("expect command but get nothing")]
+    ExpectCommand,
+    #[error("expect redirect operator, but found `{found:?}`")]
+    ExpectRedirectOperator { found: Option<Token> },
+    #[error("expect redirect target, but found `{found:?}`")]
+    ExpectRedirectTarget { found: Option<Token> },
 }
