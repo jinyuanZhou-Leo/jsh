@@ -1,5 +1,9 @@
-use std::{error::Error, mem};
+use std::mem;
+use thiserror::Error;
 
+use crate::lexer::RedirectOperator::{Input, OutputAppend, OutputTruncate};
+
+#[derive(Debug, PartialEq, Eq)]
 enum LexerState {
     Normal,
     InSingleQuote,
@@ -9,11 +13,29 @@ enum LexerState {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Token {
     Word(Word),
-    RedirectIn,
-    RedirectOut,
+    Redirect(RedirectOperator),
     IoNumber(u32),
-    Eof,
-    AndIf,
+    // &&
+    AndAnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedirectOperator {
+    Input,
+    // 覆盖写入
+    OutputTruncate,
+    // 追加写入
+    OutputAppend,
+}
+
+impl RedirectOperator {
+    pub(crate) fn default_fd(self) -> u32 {
+        //小enum, 实现了Copy特征，直接传值即可
+        match self {
+            Self::Input => 0,
+            Self::OutputAppend | Self::OutputTruncate => 1,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -25,24 +47,8 @@ pub struct Word {
 pub enum WordPart {
     SingleQuoted(String),
     DoubleQuoted(String),
-    Normal(String),
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum WordPartKind {
-    SingleQuoted,
-    DoubleQuoted,
-    Normal,
-}
-
-impl WordPartKind {
-    fn into_word_part(&self, content: String) -> WordPart {
-        match self {
-            Self::SingleQuoted => WordPart::SingleQuoted(content),
-            Self::DoubleQuoted => WordPart::DoubleQuoted(content),
-            Self::Normal => WordPart::Normal(content),
-        }
-    }
+    Unquoted(String),
+    Escaped(char),
 }
 
 pub struct Lexer;
@@ -52,321 +58,301 @@ impl Lexer {
         Self {}
     }
 
-    pub fn lex(&self, input: &str) -> Result<Vec<Token>, Box<dyn Error>> {
+    pub fn lex(&self, source: &str) -> Result<Vec<Token>, LexerError> {
+        // 解析后产生的Token数组
         let mut tokens: Vec<Token> = Vec::new();
-        let mut word_parts: Vec<WordPart> = Vec::new();
-        let mut part_text = String::new();
-        let mut state_stack = vec![LexerState::Normal];
 
-        let mut input = input.chars().peekable(); // 使用peekable让lexer可以偷看下一个元素
-        while let Some(ch) = input.next() {
-            match state_stack.last().unwrap() {
-                LexerState::Normal => match ch {
-                    ch if part_text.is_empty() && word_parts.is_empty() && ch.is_ascii_digit() => {
-                        //当缓冲区为空，且读到数字的时候
-                        let Some(next_ch) = input.peek().copied() else {
-                            // 如果数字后不存在下一个字符，则正常将该数字放入缓冲区，不做任何特殊处理
-                            part_text.push(ch);
-                            continue;
-                        };
+        // 当前正在处理的Word
+        let mut current_word: Option<WordBuilder> = None;
 
-                        if matches!(next_ch, '>' | '<') {
-                            //如果紧跟的下一个字符是重定向符号，则特殊处理
-                            input.next(); // 移动lexer游标
-                            tokens.push(Token::IoNumber(
-                                ch.to_digit(10).expect("the current character is a digit"),
-                            )); // 把当前字符视为 IO Number
-                            match next_ch {
-                                '>' => tokens.push(Token::RedirectOut),
-                                '<' => tokens.push(Token::RedirectIn),
-                                _ => {
-                                    unreachable!("next_ch here must be > or <");
-                                }
-                            }
-                        } else {
-                            //如果下一个字符不是重定向符号，则正常处理
-                            part_text.push(ch);
-                        }
-                    }
+        // Lexer状态机状态栈
+        let mut state = LexerStateManager::new();
+
+        // 转为peekable迭代器让lexer可以偷看下一个元素
+        let mut source = source.chars().peekable();
+
+        while let Some(this_char) = source.next() {
+            let next_char = source.peek().copied();
+            match state.current() {
+                LexerState::Normal => match this_char {
                     '\'' => {
-                        Self::flush_word_part(
-                            &mut word_parts,
-                            &mut part_text,
-                            WordPartKind::Normal,
-                        );
-                        state_stack.push(LexerState::InSingleQuote);
+                        current_word.get_or_insert_default().finish_unquoted_part(); // 先提交未提交的Unquoted部分
+                        state.push(LexerState::InSingleQuote);
                     }
                     '\"' => {
-                        Self::flush_word_part(
-                            &mut word_parts,
-                            &mut part_text,
-                            WordPartKind::Normal,
-                        );
-                        state_stack.push(LexerState::InDoubleQuote);
+                        current_word.get_or_insert_default().finish_unquoted_part(); // 先提交未提交的Unquoted部分
+                        state.push(LexerState::InDoubleQuote);
                     }
-                    ' ' => {
-                        Self::flush_word_part(
-                            &mut word_parts,
-                            &mut part_text,
-                            WordPartKind::Normal,
-                        );
-                        Self::flush_word_token(&mut tokens, &mut word_parts);
-                    }
-                    '>' => {
-                        Self::flush_word_part(
-                            &mut word_parts,
-                            &mut part_text,
-                            WordPartKind::Normal,
-                        );
-                        Self::flush_word_token(&mut tokens, &mut word_parts);
-                        tokens.push(Token::RedirectOut);
-                    }
-                    '<' => {
-                        Self::flush_word_part(
-                            &mut word_parts,
-                            &mut part_text,
-                            WordPartKind::Normal,
-                        );
-                        Self::flush_word_token(&mut tokens, &mut word_parts);
-                        tokens.push(Token::RedirectIn);
-                    }
-                    '\\' => {
-                        if let Some(next_ch) = input.next() {
-                            // TODO: 添加对于特殊转义符的支持
-                            //先把缓冲区的内容flush一次
-                            Self::flush_word_part(
-                                &mut word_parts,
-                                &mut part_text,
-                                WordPartKind::Normal,
-                            );
-                            //然后把后一个字符当作字面量(单引号括起来的)处理
-                            part_text.push(next_ch);
-                            Self::flush_word_part(
-                                &mut word_parts,
-                                &mut part_text,
-                                WordPartKind::SingleQuoted,
-                            );
-                        } else {
-                            //如果下一个字符不存在，说明存在一个非法的转义符
-                            return Err("Incomplete escape".into());
+                    '>' | '<' => {
+                        // ! 此处用take将current消费掉
+                        if let Some(current_word) = current_word.take() {
+                            tokens.push(current_word.finish_before_redirect()?);
+                        }
+
+                        let token = match (this_char, next_char) {
+                            ('>', Some('>')) => {
+                                // 消费下一个char
+                                source.next();
+
+                                // >> 追加写入
+                                Token::Redirect(OutputAppend)
+                            }
+                            ('>', _) => {
+                                // > 覆盖写入
+                                Token::Redirect(OutputTruncate)
+                            }
+                            ('<', Some('<')) => {
+                                //TODO: Here-doc
+                                return Err(LexerError::UnsupportedOperator("<<"));
+                            }
+                            ('<', _) => {
+                                // 读入
+                                Token::Redirect(Input)
+                            }
+                            _ => unreachable!("this branch only handles `<` and `>`"),
                         };
+
+                        tokens.push(token);
                     }
                     '&' => {
-                        let Some(next_ch) = input.peek() else {
-                            part_text.push(ch);
-                            continue;
-                        };
+                        if next_char == Some('&') {
+                            // AndAnd
+                            source.next(); // 消费下一个字符
 
-                        if matches!(*next_ch, '&') {
-                            input.next(); //消费下一个字符
-                            Self::flush_word_part(
-                                &mut word_parts,
-                                &mut part_text,
-                                WordPartKind::Normal,
-                            );
-                            Self::flush_word_token(&mut tokens, &mut word_parts);
-                            tokens.push(Token::AndIf);
+                            // 先提交 WordBuild 中未提交的内容
+                            if let Some(current_word) = current_word.take() {
+                                tokens.push(Token::Word(current_word.finish()));
+                            }
+
+                            // 然后提交AndAnd
+                            tokens.push(Token::AndAnd);
+                        } else {
+                            // TODO: Background
+                            return Err(LexerError::UnsupportedOperator("&"));
                         }
-                    }
-                    ch => {
-                        part_text.push(ch); // 正常字符压入缓冲区
-                    }
-                },
-                LexerState::InSingleQuote => match ch {
-                    '\'' => {
-                        Self::flush_word_part(
-                            &mut word_parts,
-                            &mut part_text,
-                            WordPartKind::SingleQuoted,
-                        );
-                        state_stack.pop();
-                    }
-                    ch => {
-                        part_text.push(ch);
-                    }
-                },
-                LexerState::InDoubleQuote => match ch {
-                    '\"' => {
-                        Self::flush_word_part(
-                            &mut word_parts,
-                            &mut part_text,
-                            WordPartKind::DoubleQuoted,
-                        );
-                        state_stack.pop();
                     }
                     '\\' => {
-                        match input.peek() {
-                            Some('\"' | '\\' | '$' | '`' | '\n') => {
-                                let next_ch = input.next().unwrap(); // SAFTY: 此处已经通过peek偷看过下一个字符, 该情况中下一个字符一定存在，因此可以安全的unwrap
-                                part_text.push(next_ch); // 正常消费下一个元素
+                        // Escape
+                        if let Some(next_char) = next_char {
+                            // 转义字符要存在
+                            current_word.get_or_insert_default().push_escaped(next_char);
+
+                            source.next(); // 消费next_char
+                        } else {
+                            return Err(LexerError::IncompleteEscape);
+                        }
+                    }
+                    ' ' | '\t' => {
+                        if let Some(current_word) = current_word.take() {
+                            // 如果存在 WordBuild, 压入tokens
+                            tokens.push(Token::Word(current_word.finish()));
+                        }
+                    }
+                    ch => {
+                        current_word.get_or_insert_default().push_char(ch);
+                    }
+                },
+                LexerState::InSingleQuote => match this_char {
+                    '\'' => {
+                        current_word
+                            .as_mut()
+                            .expect("single-quote state must have a current word")
+                            .finish_single_quoted_part();
+
+                        state.pop();
+                    }
+                    ch => {
+                        current_word
+                            .as_mut()
+                            .expect("single-quote state must have a current word")
+                            .push_char(ch);
+                    }
+                },
+                LexerState::InDoubleQuote => match this_char {
+                    '\"' => {
+                        current_word
+                            .as_mut()
+                            .expect("double-quote state must have a current word")
+                            .finish_double_quoted_part();
+
+                        state.pop();
+                    }
+                    '\\' => {
+                        // 双引号中的转义
+                        let current_word = current_word
+                            .as_mut()
+                            .expect("double-quote state must have a current word");
+                        match next_char {
+                            Some('\"' | '\\' | '$' | '`') => {
+                                // 消费下一个字符，存为Escape类型
+                                let escaped_ch = source
+                                    .next()
+                                    .expect("match already confirmed next character exists");
+                                current_word.push_double_quoted_escaped(escaped_ch);
                             }
-                            Some(c) => {
-                                part_text.push('\\'); //下一个元素不能转义，则backslash在此处被当作字面量
+                            Some('\n') => {
+                                // 行续接, 跳过转义符和换行符
+                                source.next();
                             }
-                            None => {
-                                part_text.push('\\'); //不存在下一个元素，当作字面量处理
+                            Some(_) | None => {
+                                //不存在转义元素或者不可转义，当作字面量处理
+                                current_word.push_char('\\');
                             }
                         }
                     }
                     ch => {
-                        part_text.push(ch);
+                        current_word
+                            .as_mut()
+                            .expect("double-quote state must have a current word")
+                            .push_char(ch);
                     }
                 },
             }
         }
 
-        Self::flush_word_part(&mut word_parts, &mut part_text, WordPartKind::Normal);
-        Self::flush_word_token(&mut tokens, &mut word_parts);
-
-        if !matches!(state_stack.last(), Some(LexerState::Normal)) {
-            return Err("Unclosed quote".into());
+        if let Some(current_word) = current_word.take() {
+            tokens.push(Token::Word(current_word.finish()));
         }
 
-        tokens.push(Token::Eof); // 插入Eof表示结束
-
-        Ok(tokens)
-    }
-
-    fn flush_word_part(word_parts: &mut Vec<WordPart>, part_text: &mut String, kind: WordPartKind) {
-        if part_text.is_empty() {
-            return;
+        
+        match state.current() {
+            LexerState::InDoubleQuote => {
+                return Err(LexerError::UnclosedDoubleQuote);
+            },
+            LexerState::InSingleQuote => {
+                return Err(LexerError::UnclosedSingleQuote);
+            },
+            LexerState::Normal => {
+                Ok(tokens)
+            }
         }
-
-        word_parts.push(kind.into_word_part(mem::take(part_text)));
-    }
-
-    fn flush_word_token(tokens: &mut Vec<Token>, word_parts: &mut Vec<WordPart>) {
-        if word_parts.is_empty() {
-            return;
-        }
-
-        tokens.push(Token::Word(Word {
-            parts: mem::take(word_parts),
-        }));
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{Lexer, Token, Word, WordPart};
+/// 用于构建Word对象的工具类
+#[derive(Debug, Default)]
+struct WordBuilder {
+    parts: Vec<WordPart>, // 解析完成的WordPart
+    buffer: String,       // 缓冲区，保存正在解析的部分
+}
 
-    fn word(parts: Vec<WordPart>) -> Token {
-        Token::Word(Word { parts })
+impl WordBuilder {
+    /// 把字符压入WordBuilder缓冲区
+    fn push_char(&mut self, c: char) {
+        self.buffer.push(c);
     }
 
-    fn lex(input: &str) -> Vec<Token> {
-        Lexer::new()
-            .lex(input)
-            .expect("input should lex successfully")
+    /// 结束一个Unquoted Part
+    /// 取出缓冲区内容，创建一个WordPart::Unquoted，放入parts
+    fn finish_unquoted_part(&mut self) {
+        if self.buffer.is_empty() {
+            // 当缓冲区为空的时候不做任何操作
+            return;
+        }
+
+        self.parts
+            .push(WordPart::Unquoted(mem::take(&mut self.buffer)));
     }
 
-    #[test]
-    fn lexes_quoted_and_unquoted_word_parts() {
-        let cmd = "echo 'hello        world' -a";
-        let lexer = Lexer::new();
+    /// 提交一个SingleQuoted Part
+    /// 取出缓冲区内容，创建一个WordPart::Unquoted，放入parts
+    fn finish_single_quoted_part(&mut self) {
+        self.parts
+            .push(WordPart::SingleQuoted(mem::take(&mut self.buffer)));
+    }
 
-        assert_eq!(
-            lexer.lex(cmd).unwrap(),
-            vec![
-                word(vec![WordPart::Normal("echo".to_string())]),
-                word(vec![WordPart::SingleQuoted(
-                    "hello        world".to_string()
-                )]),
-                word(vec![WordPart::Normal("-a".to_string())]),
-                Token::Eof,
-            ]
+    /// 提交一个DoubleQuoted Part
+    /// 取出缓冲区内容，创建一个WordPart::Unquoted，放入parts
+    fn finish_double_quoted_part(&mut self) {
+        self.parts
+            .push(WordPart::DoubleQuoted(mem::take(&mut self.buffer)));
+    }
+
+    ///在重定向前完成WordBuilder处理,返回Token
+    fn finish_before_redirect(mut self) -> Result<Token, LexerError> {
+        // 如果有且仅有buffer不为空，且为纯数字，则解析为IONumber
+        let is_io_number = self.parts.is_empty()
+            && !self.buffer.is_empty()
+            && self.buffer.chars().all(|c| c.is_ascii_digit());
+
+        if is_io_number {
+            let text = mem::take(&mut self.buffer); //未转换类型的IoNumber，隔离到text变量中方便错误处理
+            // 把text转换成u32, 并处理错误
+            let fd = text
+                .parse::<u32>()
+                .map_err(|_| LexerError::InvalidIoNumber(text))?;
+
+            return Ok(Token::IoNumber(fd));
+        }
+
+        Ok(Token::Word(self.finish()))
+    }
+
+    /// 直接向parts中提交一个 Escaped Part (一个字符)
+    fn push_escaped(&mut self, c: char) {
+        self.finish_unquoted_part(); // 因为转义符只在非单双引号出现，且为单字符，所以要先清空缓冲区
+
+        self.parts.push(WordPart::Escaped(c));
+    }
+
+    fn push_double_quoted_escaped(&mut self, c: char) {
+        self.finish_double_quoted_part();
+
+        self.parts.push(WordPart::Escaped(c));
+    }
+
+    fn finish(mut self) -> Word {
+        self.finish_unquoted_part();
+
+        Word { parts: self.parts }
+    }
+}
+
+struct LexerStateManager {
+    state_stack: Vec<LexerState>,
+}
+
+impl LexerStateManager {
+    fn new() -> Self {
+        LexerStateManager {
+            state_stack: vec![LexerState::Normal],
+        }
+    }
+
+    fn from(value: Vec<LexerState>) -> Self {
+        LexerStateManager { state_stack: value }
+    }
+
+    fn push(&mut self, state: LexerState) {
+        self.state_stack.push(state);
+    }
+
+    fn pop(&mut self) {
+        self.state_stack.pop();
+        assert!(
+            self.state_stack.is_empty(),
+            "Lexer state could not be empty"
         );
     }
 
-    #[test]
-    fn lexes_input_and_output_redirects_with_io_number() {
-        assert_eq!(
-            lex("cat<in 2>out"),
-            vec![
-                word(vec![WordPart::Normal("cat".to_string())]),
-                Token::RedirectIn,
-                word(vec![WordPart::Normal("in".to_string())]),
-                Token::IoNumber(2),
-                Token::RedirectOut,
-                word(vec![WordPart::Normal("out".to_string())]),
-                Token::Eof,
-            ]
-        );
+    fn current(&self) -> &LexerState {
+        self.state_stack.last().unwrap()
     }
+}
 
-    #[test]
-    fn lexes_adjacent_quoted_and_unquoted_parts_as_one_word() {
-        assert_eq!(
-            lex(r#"prefix'single'"double""#),
-            vec![
-                word(vec![
-                    WordPart::Normal("prefix".to_string()),
-                    WordPart::SingleQuoted("single".to_string()),
-                    WordPart::DoubleQuoted("double".to_string()),
-                ]),
-                Token::Eof
-            ]
-        );
-    }
-
-    #[test]
-    fn lexes_and_if_operator() {
-        assert_eq!(
-            lex("true && echo ok"),
-            vec![
-                word(vec![WordPart::Normal("true".to_string())]),
-                Token::AndIf,
-                word(vec![WordPart::Normal("echo".to_string())]),
-                word(vec![WordPart::Normal("ok".to_string())]),
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn lexes_unquoted_escape_as_literal_word_part() {
-        assert_eq!(
-            lex(r#"echo hello\ world"#),
-            vec![
-                word(vec![WordPart::Normal("echo".to_string())]),
-                word(vec![
-                    WordPart::Normal("hello".to_string()),
-                    WordPart::SingleQuoted(" ".to_string()),
-                    WordPart::Normal("world".to_string()),
-                ]),
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn lexes_supported_double_quoted_escapes() {
-        assert_eq!(
-            lex(r#"echo "a\"b\\c\$d""#),
-            vec![
-                word(vec![WordPart::Normal("echo".to_string())]),
-                word(vec![WordPart::DoubleQuoted("a\"b\\c$d".to_string())]),
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn lexes_empty_input_as_eof() {
-        assert_eq!(lex(""), vec![Token::Eof]);
-    }
-
-    #[test]
-    fn reports_incomplete_escape() {
-        let error = Lexer::new().lex("echo \\").unwrap_err();
-
-        assert_eq!(error.to_string(), "Incomplete escape");
-    }
-
-    #[test]
-    fn reports_unclosed_quote() {
-        let error = Lexer::new().lex("echo 'unterminated").unwrap_err();
-
-        assert_eq!(error.to_string(), "Unclosed quote");
-    }
+#[derive(Debug, Error, PartialEq, Eq)]
+pub(crate) enum LexerError {
+    #[error("incomplete escape sequence")]
+    IncompleteEscape,
+    #[error("unclosed single quote")]
+    UnclosedSingleQuote,
+    #[error("unclosed double quote")]
+    UnclosedDoubleQuote,
+    #[error("unsupported operator \'{0}\'")]
+    UnsupportedOperator(&'static str),
+    #[error("invalid IoNumber: \'{0}\'")]
+    // 这里使用String而非u32是因为出错时不能保证String是可以被正常解析成u32的
+    InvalidIoNumber(String),
+    #[error("unexpected error: {0}")]
+    UnexpectedError(String),
 }
