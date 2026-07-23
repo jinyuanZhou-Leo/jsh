@@ -12,10 +12,10 @@ struct Redirection {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum Ast {
+pub(crate) enum Ast {
     Command {
         args: Vec<Word>,
-        redirection: Vec<Redirection>,
+        redirections: Vec<Redirection>,
     },
     AndIf {
         left: Box<Ast>,
@@ -23,7 +23,7 @@ enum Ast {
     },
 }
 
-pub struct Parser {
+pub(crate) struct Parser {
     tokens: Peekable<IntoIter<Token>>,
 }
 
@@ -45,7 +45,7 @@ impl Parser {
 
         // 检查是否存在parser未消费的剩余Token
         if let Some(token) = self.tokens.peek() {
-            return Err(ParserError::UnexpectedToken(token.clone()));
+            return Err(ParserError::UnexpectedToken(token));
         }
 
         Ok(Some(ast))
@@ -80,7 +80,7 @@ impl Parser {
 
         Ok(Ast::Command {
             args: command,
-            redirection: redirections,
+            redirections,
         })
     }
 

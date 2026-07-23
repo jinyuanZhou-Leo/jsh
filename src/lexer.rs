@@ -29,6 +29,7 @@ pub(crate) enum RedirectOperator {
 }
 
 impl RedirectOperator {
+    /// 返回RedirectOperator对应的默认fd
     pub(crate) fn default_fd(self) -> u32 {
         //小enum, 实现了Copy特征，直接传值即可
         match self {
@@ -73,15 +74,15 @@ impl Lexer {
 
         while let Some(this_char) = source.next() {
             let next_char = source.peek().copied();
-            match state.current() {
+            match state.current()? {
                 LexerState::Normal => match this_char {
                     '\'' => {
                         current_word.get_or_insert_default().finish_unquoted_part(); // 先提交未提交的Unquoted部分
-                        state.push(LexerState::InSingleQuote);
+                        state.push(LexerState::InSingleQuote)?;
                     }
                     '\"' => {
                         current_word.get_or_insert_default().finish_unquoted_part(); // 先提交未提交的Unquoted部分
-                        state.push(LexerState::InDoubleQuote);
+                        state.push(LexerState::InDoubleQuote)?;
                     }
                     '>' | '<' => {
                         // ! 此处用take将current消费掉
@@ -159,7 +160,7 @@ impl Lexer {
                             .expect("single-quote state must have a current word")
                             .finish_single_quoted_part();
 
-                        state.pop();
+                        state.pop_quote_state()?;
                     }
                     ch => {
                         current_word
@@ -175,7 +176,7 @@ impl Lexer {
                             .expect("double-quote state must have a current word")
                             .finish_double_quoted_part();
 
-                        state.pop();
+                        state.pop_quote_state()?;
                     }
                     '\\' => {
                         // 双引号中的转义
@@ -214,17 +215,10 @@ impl Lexer {
             tokens.push(Token::Word(current_word.finish()));
         }
 
-        
-        match state.current() {
-            LexerState::InDoubleQuote => {
-                return Err(LexerError::UnclosedDoubleQuote);
-            },
-            LexerState::InSingleQuote => {
-                return Err(LexerError::UnclosedSingleQuote);
-            },
-            LexerState::Normal => {
-                Ok(tokens)
-            }
+        match state.current()? {
+            LexerState::InDoubleQuote => Err(LexerError::UnclosedDoubleQuote),
+            LexerState::InSingleQuote => Err(LexerError::UnclosedSingleQuote),
+            LexerState::Normal => Ok(tokens),
         }
     }
 }
@@ -276,7 +270,8 @@ impl WordBuilder {
             && self.buffer.chars().all(|c| c.is_ascii_digit());
 
         if is_io_number {
-            let text = mem::take(&mut self.buffer); //未转换类型的IoNumber，隔离到text变量中方便错误处理
+            // 未转换类型的 IoNumber，隔离到 text 变量中方便错误处理
+            let text = mem::take(&mut self.buffer);
             // 把text转换成u32, 并处理错误
             let fd = text
                 .parse::<u32>()
@@ -319,29 +314,45 @@ impl LexerStateManager {
         }
     }
 
-    fn from(value: Vec<LexerState>) -> Self {
-        LexerStateManager { state_stack: value }
-    }
+    fn push(&mut self, state: LexerState) -> Result<(), LexerStateError> {
+        if matches!(state, LexerState::Normal) {
+            return Err(LexerStateError::CannotPushBaseState);
+        }
 
-    fn push(&mut self, state: LexerState) {
         self.state_stack.push(state);
+        Ok(())
     }
 
-    fn pop(&mut self) {
-        self.state_stack.pop();
-        assert!(
-            self.state_stack.is_empty(),
-            "Lexer state could not be empty"
-        );
+    fn pop_quote_state(&mut self) -> Result<(), LexerStateError> {
+        match self.state_stack.len() {
+            0 => Err(LexerStateError::EmptyStack),
+            1 => Err(LexerStateError::CannotPopBaseState),
+            _ => {
+                self.state_stack.pop();
+                Ok(())
+            }
+        }
     }
 
-    fn current(&self) -> &LexerState {
-        self.state_stack.last().unwrap()
+    fn current(&self) -> Result<&LexerState, LexerStateError> {
+        self.state_stack.last().ok_or(LexerStateError::EmptyStack)
     }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
+pub(crate) enum LexerStateError {
+    #[error("lexer state stack is empty")]
+    EmptyStack,
+    #[error("cannot push the Normal state onto the lexer state stack")]
+    CannotPushBaseState,
+    #[error("cannot pop the base Normal state from the lexer state stack")]
+    CannotPopBaseState,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum LexerError {
+    #[error("invalid lexer state transition: {0}")]
+    InvalidStateTransition(#[from] LexerStateError),
     #[error("incomplete escape sequence")]
     IncompleteEscape,
     #[error("unclosed single quote")]
@@ -355,4 +366,42 @@ pub(crate) enum LexerError {
     InvalidIoNumber(String),
     #[error("unexpected error: {0}")]
     UnexpectedError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Lexer, LexerState, LexerStateError, LexerStateManager};
+
+    #[test]
+    fn closing_a_quote_keeps_the_normal_base_state() {
+        let mut state = LexerStateManager::new();
+
+        state
+            .push(LexerState::InSingleQuote)
+            .expect("a quote state can be pushed");
+        state
+            .pop_quote_state()
+            .expect("a quote state can be popped");
+
+        assert!(matches!(state.current(), Ok(LexerState::Normal)));
+    }
+
+    #[test]
+    fn cannot_pop_the_normal_base_state() {
+        let mut state = LexerStateManager::new();
+
+        assert_eq!(
+            state.pop_quote_state(),
+            Err(LexerStateError::CannotPopBaseState)
+        );
+        assert!(matches!(state.current(), Ok(LexerState::Normal)));
+    }
+
+    #[test]
+    fn closing_quotes_does_not_fail_lexing() {
+        let lexer = Lexer::new();
+
+        assert!(lexer.lex("echo 'hello'").is_ok());
+        assert!(lexer.lex("echo \"hello\"").is_ok());
+    }
 }
