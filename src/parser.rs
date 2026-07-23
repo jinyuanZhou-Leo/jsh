@@ -45,7 +45,7 @@ impl Parser {
 
         // 检查是否存在parser未消费的剩余Token
         if let Some(token) = self.tokens.peek() {
-            return Err(ParserError::UnexpectedToken(token));
+            return Err(ParserError::UnexpectedToken(token.clone()));
         }
 
         Ok(Some(ast))
