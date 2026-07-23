@@ -44,8 +44,8 @@ impl Parser {
         let ast = self.parse_and_if()?;
 
         // 检查是否存在parser未消费的剩余Token
-        if let Some(token) = self.tokens.peek() {
-            return Err(ParserError::UnexpectedToken(token.clone()));
+        if let Some(token) = self.tokens.next() {
+            return Err(ParserError::UnexpectedToken(token));
         }
 
         Ok(Some(ast))
