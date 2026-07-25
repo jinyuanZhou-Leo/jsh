@@ -8,19 +8,19 @@ use crate::lexer::{RedirectOperator, Token, Word};
 pub(crate) struct Redirection {
     pub(crate) fd: u32,
     pub(crate) operator: RedirectOperator,
-    pub(crate) target: Word
+    pub(crate) target: Word,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) struct Command {
+    pub(crate) args: Vec<Word>,
+    pub(crate) redirections: Vec<Redirection>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum Ast {
-    Command {
-        args: Vec<Word>,
-        redirections: Vec<Redirection>,
-    },
-    AndIf {
-        left: Box<Ast>,
-        right: Box<Ast>,
-    },
+    Command(Command),
+    AndIf { left: Box<Ast>, right: Box<Ast> },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -36,7 +36,6 @@ pub(crate) enum ParserError {
     #[error("expect redirect target, but found `{found:?}`")]
     ExpectRedirectTarget { found: Option<Token> },
 }
-
 
 pub(crate) struct Parser {
     tokens: Peekable<IntoIter<Token>>,
@@ -93,10 +92,10 @@ impl Parser {
             return Err(ParserError::ExpectCommand);
         }
 
-        Ok(Ast::Command {
+        Ok(Ast::Command(Command {
             args: command,
             redirections,
-        })
+        }))
     }
 
     fn parse_redirection(&mut self) -> Result<Redirection, ParserError> {
@@ -136,8 +135,11 @@ impl Parser {
             }
         };
 
-
-        Ok(Redirection { fd, operator, target })
+        Ok(Redirection {
+            fd,
+            operator,
+            target,
+        })
     }
 
     fn parse_and_if(&mut self) -> Result<Ast, ParserError> {
@@ -164,4 +166,3 @@ impl Parser {
         Ok(left)
     }
 }
-

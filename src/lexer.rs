@@ -1,4 +1,4 @@
-use std::mem;
+use std::{mem, vec::IntoIter};
 use thiserror::Error;
 
 use crate::lexer::RedirectOperator::{Input, OutputAppend, OutputTruncate};
@@ -42,6 +42,12 @@ impl RedirectOperator {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Word {
     parts: Vec<WordPart>,
+}
+
+impl Word {
+    fn into_part(self) -> impl Iterator<Item = WordPart>{
+        self.parts.into_iter()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
