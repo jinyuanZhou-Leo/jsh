@@ -5,10 +5,10 @@ use thiserror::Error;
 use crate::lexer::{RedirectOperator, Token, Word};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-struct Redirection {
-    fd: u32,
-    operator: RedirectOperator,
-    target: Word
+pub(crate) struct Redirection {
+    pub(crate) fd: u32,
+    pub(crate) operator: RedirectOperator,
+    pub(crate) target: Word
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -22,6 +22,21 @@ pub(crate) enum Ast {
         right: Box<Ast>,
     },
 }
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub(crate) enum ParserError {
+    #[error("unexpected token: `{0:?}`")]
+    UnexpectedToken(Token),
+    #[error("missing command after &&")]
+    MissingCommandAfterAndIf,
+    #[error("expect command but get nothing")]
+    ExpectCommand,
+    #[error("expect redirect operator, but found `{found:?}`")]
+    ExpectRedirectOperator { found: Option<Token> },
+    #[error("expect redirect target, but found `{found:?}`")]
+    ExpectRedirectTarget { found: Option<Token> },
+}
+
 
 pub(crate) struct Parser {
     tokens: Peekable<IntoIter<Token>>,
@@ -150,16 +165,3 @@ impl Parser {
     }
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum ParserError {
-    #[error("unexpected token: `{0:?}`")]
-    UnexpectedToken(Token),
-    #[error("missing command after &&")]
-    MissingCommandAfterAndIf,
-    #[error("expect command but get nothing")]
-    ExpectCommand,
-    #[error("expect redirect operator, but found `{found:?}`")]
-    ExpectRedirectOperator { found: Option<Token> },
-    #[error("expect redirect target, but found `{found:?}`")]
-    ExpectRedirectTarget { found: Option<Token> },
-}
