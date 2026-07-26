@@ -40,12 +40,12 @@ impl RedirectOperator {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Word {
+pub(crate) struct Word {
     parts: Vec<WordPart>,
 }
 
 impl Word {
-    fn into_part(self) -> impl Iterator<Item = WordPart>{
+    pub(crate) fn into_part(self) -> impl Iterator<Item = WordPart>{
         self.parts.into_iter()
     }
 }
