@@ -2,8 +2,8 @@ use std::{collections::HashMap, env::home_dir};
 use thiserror::Error;
 
 use crate::{
-    lexer::{RedirectOperator, Word, WordPart},
     parser::Command,
+    token::{RedirectOperator, Word, WordPart},
 };
 
 pub(crate) struct ExpandedRedirection {
@@ -29,11 +29,14 @@ pub(crate) struct Expander<'env> {
     env: &'env HashMap<String, String>,
 }
 
+// Notes: 不再提供直接Expand整个Ast的接口，而是在执行器中执行一条展开一条
+
 impl<'env> Expander<'env> {
     pub(crate) fn new(env: &'env HashMap<String, String>) -> Self {
         Self { env }
     }
 
+    /// 展开Command类型
     pub(crate) fn expand_command(
         &self,
         command: Command,
@@ -62,9 +65,10 @@ impl<'env> Expander<'env> {
         })
     }
 
+    /// 展开Word中所有的WordPart, 返回String
     pub(crate) fn expand_word(&self, word: Word) -> Result<String, ExpanderError> {
         let mut buffer = String::new();
-        for (idx, part) in word.into_part().enumerate() {
+        for (idx, part) in word.into_parts().enumerate() {
             match part {
                 WordPart::Unquoted(content) => {
                     if idx == 0 && content.starts_with('~') {

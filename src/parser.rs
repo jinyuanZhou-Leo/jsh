@@ -2,7 +2,7 @@ use std::{iter::Peekable, vec::IntoIter};
 
 use thiserror::Error;
 
-use crate::lexer::{RedirectOperator, Token, Word};
+use crate::token::{RedirectOperator, Token, Word};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct Redirection {
