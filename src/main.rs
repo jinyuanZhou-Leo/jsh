@@ -65,11 +65,6 @@ fn main() -> Result<(), ReplError> {
                 eprintln!("{error}");
             }
         }
-
-        if let Err(error) = execute_line(&mut shell, &mut executor, source.trim_end()) {
-            shell.set_last_status(error.status());
-            eprintln!("{error}");
-        }
     }
 
     Ok(())
