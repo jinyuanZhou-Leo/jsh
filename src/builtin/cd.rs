@@ -18,12 +18,12 @@ pub fn cd(shell: &mut Shell, argv: &[String], _io: &mut BuiltinIo<'_>) -> Builti
             // canonical同时也检查了路径是否存在
             let dir = match dir.canonicalize() {
                 Ok(dir) => dir,
-                Err(_) => return Err(BuiltinError::new(1, "No such file or directory"))
+                Err(_) => return Err(BuiltinError::new(1, format!("cd: {0}: No such file or directory", dir.display())))
             };
 
             // 检查路径是否为目录
             if !dir.is_dir() {
-                return Err(BuiltinError::new(1, "Not a directory"));
+                return Err(BuiltinError::new(1, format!("cd: {0}: Not a directory", dir.display())));
             }
 
             shell.set_current_dir(dir);
