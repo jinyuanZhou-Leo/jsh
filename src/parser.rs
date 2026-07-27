@@ -166,3 +166,135 @@ impl Parser {
         Ok(left)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Ast, Command, Parser, ParserError, Redirection};
+    use crate::{
+        lexer::Lexer,
+        token::{RedirectOperator, Token, Word, WordPart},
+    };
+
+    fn word(value: &str) -> Word {
+        Word::from_parts(vec![WordPart::Unquoted(value.into())])
+    }
+
+    fn parse(source: &str) -> Result<Option<Ast>, ParserError> {
+        let tokens = Lexer::new().lex(source).expect("test input should lex");
+        Parser::new(tokens).parse()
+    }
+
+    #[test]
+    fn parses_empty_input_as_no_ast() {
+        assert_eq!(parse(""), Ok(None));
+        assert_eq!(parse(" \t "), Ok(None));
+    }
+
+    #[test]
+    fn parses_command_arguments_and_ordered_redirections() {
+        let ast = parse("cat input 2>>error >output <source")
+            .expect("valid command should parse")
+            .expect("command should produce an AST");
+
+        assert_eq!(
+            ast,
+            Ast::Command(Command {
+                args: vec![word("cat"), word("input")],
+                redirections: vec![
+                    Redirection {
+                        fd: 2,
+                        operator: RedirectOperator::OutputAppend,
+                        target: word("error"),
+                    },
+                    Redirection {
+                        fd: 1,
+                        operator: RedirectOperator::OutputTruncate,
+                        target: word("output"),
+                    },
+                    Redirection {
+                        fd: 0,
+                        operator: RedirectOperator::Input,
+                        target: word("source"),
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn permits_a_redirection_only_command() {
+        assert_eq!(
+            parse(">output"),
+            Ok(Some(Ast::Command(Command {
+                args: vec![],
+                redirections: vec![Redirection {
+                    fd: 1,
+                    operator: RedirectOperator::OutputTruncate,
+                    target: word("output"),
+                }],
+            })))
+        );
+    }
+
+    #[test]
+    fn parses_and_if_left_associatively() {
+        let command = |name| {
+            Ast::Command(Command {
+                args: vec![word(name)],
+                redirections: vec![],
+            })
+        };
+
+        assert_eq!(
+            parse("first && second && third"),
+            Ok(Some(Ast::AndIf {
+                left: Box::new(Ast::AndIf {
+                    left: Box::new(command("first")),
+                    right: Box::new(command("second")),
+                }),
+                right: Box::new(command("third")),
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_redirections() {
+        assert_eq!(
+            Parser::new(vec![Token::IoNumber(2)]).parse(),
+            Err(ParserError::ExpectRedirectOperator { found: None })
+        );
+        assert_eq!(
+            Parser::new(vec![
+                Token::IoNumber(2),
+                Token::Word(word("not-an-operator")),
+            ])
+            .parse(),
+            Err(ParserError::ExpectRedirectOperator {
+                found: Some(Token::Word(word("not-an-operator"))),
+            })
+        );
+        assert_eq!(
+            parse("echo >"),
+            Err(ParserError::ExpectRedirectTarget { found: None })
+        );
+        assert_eq!(
+            Parser::new(vec![
+                Token::Redirect(RedirectOperator::OutputTruncate),
+                Token::AndAnd,
+            ])
+            .parse(),
+            Err(ParserError::ExpectRedirectTarget {
+                found: Some(Token::AndAnd),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_missing_commands_around_and_if() {
+        assert_eq!(parse("&& echo ok"), Err(ParserError::ExpectCommand));
+        assert_eq!(
+            parse("echo ok &&"),
+            Err(ParserError::MissingCommandAfterAndIf)
+        );
+    }
+}

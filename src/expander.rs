@@ -106,3 +106,92 @@ pub(crate) enum ExpanderError {
     #[error("Could not derive tilde, please check environment variables")]
     CouldNotExpandTilde,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, env::home_dir, sync::OnceLock};
+
+    use super::Expander;
+    use crate::{
+        parser::{Command, Redirection},
+        token::{RedirectOperator, Word, WordPart},
+    };
+
+    fn expander() -> Expander<'static> {
+        // The current Expander keeps the environment for future variable expansion.
+        static ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
+        Expander::new(ENV.get_or_init(HashMap::new))
+    }
+
+    #[test]
+    fn expands_all_word_parts_in_order() {
+        let word = Word::from_parts(vec![
+            WordPart::Unquoted("plain".into()),
+            WordPart::SingleQuoted(" single ".into()),
+            WordPart::DoubleQuoted("double".into()),
+            WordPart::Escaped('!'),
+        ]);
+
+        assert_eq!(
+            expander().expand_word(word),
+            Ok("plain single double!".into())
+        );
+    }
+
+    #[test]
+    fn expands_tilde_only_at_the_start_of_the_first_unquoted_part() {
+        let home = home_dir().expect("test environment should have a home directory");
+        let word = Word::from_parts(vec![
+            WordPart::Unquoted("~/project".into()),
+            WordPart::Unquoted("/~literal".into()),
+        ]);
+
+        assert_eq!(
+            expander().expand_word(word),
+            Ok(format!("{}/project/~literal", home.display()))
+        );
+    }
+
+    #[test]
+    fn does_not_expand_a_quoted_or_non_initial_tilde() {
+        let quoted = Word::from_parts(vec![WordPart::SingleQuoted("~/project".into())]);
+        let non_initial = Word::from_parts(vec![
+            WordPart::Unquoted("prefix".into()),
+            WordPart::Unquoted("~/project".into()),
+        ]);
+
+        assert_eq!(expander().expand_word(quoted), Ok("~/project".into()));
+        assert_eq!(
+            expander().expand_word(non_initial),
+            Ok("prefix~/project".into())
+        );
+    }
+
+    #[test]
+    fn expands_command_arguments_and_redirection_targets() {
+        let command = Command {
+            args: vec![
+                Word::from_parts(vec![WordPart::Unquoted("echo".into())]),
+                Word::from_parts(vec![WordPart::SingleQuoted("hello world".into())]),
+            ],
+            redirections: vec![Redirection {
+                fd: 2,
+                operator: RedirectOperator::OutputAppend,
+                target: Word::from_parts(vec![WordPart::Unquoted("error.log".into())]),
+            }],
+        };
+
+        let expanded = expander()
+            .expand_command(command)
+            .expect("command should expand");
+
+        assert_eq!(expanded.args, vec!["echo", "hello world"]);
+        assert_eq!(expanded.redirections.len(), 1);
+        assert_eq!(expanded.redirections[0].fd, 2);
+        assert_eq!(
+            expanded.redirections[0].operator,
+            RedirectOperator::OutputAppend
+        );
+        assert_eq!(expanded.redirections[0].target, "error.log");
+    }
+}

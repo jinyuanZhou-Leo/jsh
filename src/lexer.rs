@@ -331,7 +331,12 @@ pub(crate) enum LexerError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lexer, LexerState, LexerStateError, LexerStateManager};
+    use super::{Lexer, LexerError, LexerState, LexerStateError, LexerStateManager};
+    use crate::token::{RedirectOperator, Token, Word, WordPart};
+
+    fn word(parts: Vec<WordPart>) -> Token {
+        Token::Word(Word::from_parts(parts))
+    }
 
     #[test]
     fn closing_a_quote_keeps_the_normal_base_state() {
@@ -364,5 +369,134 @@ mod tests {
 
         assert!(lexer.lex("echo 'hello'").is_ok());
         assert!(lexer.lex("echo \"hello\"").is_ok());
+    }
+
+    #[test]
+    fn lexes_word_parts_without_losing_quote_boundaries() {
+        let tokens = Lexer::new()
+            .lex("echo pre'single'\"double\"\\ value '' \"\"")
+            .expect("valid quoting should lex");
+
+        assert_eq!(
+            tokens,
+            vec![
+                word(vec![WordPart::Unquoted("echo".into())]),
+                word(vec![
+                    WordPart::Unquoted("pre".into()),
+                    WordPart::SingleQuoted("single".into()),
+                    WordPart::DoubleQuoted("double".into()),
+                    WordPart::Escaped(' '),
+                    WordPart::Unquoted("value".into()),
+                ]),
+                word(vec![WordPart::SingleQuoted(String::new())]),
+                word(vec![WordPart::DoubleQuoted(String::new())]),
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_redirections_io_numbers_and_and_if() {
+        let tokens = Lexer::new()
+            .lex("cat 0<input 2>>error && echo done > output")
+            .expect("valid operators should lex");
+
+        assert_eq!(
+            tokens,
+            vec![
+                word(vec![WordPart::Unquoted("cat".into())]),
+                Token::IoNumber(0),
+                Token::Redirect(RedirectOperator::Input),
+                word(vec![WordPart::Unquoted("input".into())]),
+                Token::IoNumber(2),
+                Token::Redirect(RedirectOperator::OutputAppend),
+                word(vec![WordPart::Unquoted("error".into())]),
+                Token::AndAnd,
+                word(vec![WordPart::Unquoted("echo".into())]),
+                word(vec![WordPart::Unquoted("done".into())]),
+                Token::Redirect(RedirectOperator::OutputTruncate),
+                word(vec![WordPart::Unquoted("output".into())]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_quoted_number_before_redirect_is_a_word() {
+        let tokens = Lexer::new()
+            .lex("'2'>output")
+            .expect("quoted number should lex");
+
+        assert_eq!(
+            tokens,
+            vec![
+                word(vec![WordPart::SingleQuoted("2".into())]),
+                Token::Redirect(RedirectOperator::OutputTruncate),
+                word(vec![WordPart::Unquoted("output".into())]),
+            ]
+        );
+    }
+
+    #[test]
+    fn double_quotes_only_escape_supported_characters() {
+        let tokens = Lexer::new()
+            .lex(r#"echo "\$x\q\\\"""#)
+            .expect("double-quoted escapes should lex");
+
+        assert_eq!(
+            tokens,
+            vec![
+                word(vec![WordPart::Unquoted("echo".into())]),
+                word(vec![
+                    WordPart::DoubleQuoted(String::new()),
+                    WordPart::Escaped('$'),
+                    WordPart::DoubleQuoted(r"x\q".into()),
+                    WordPart::Escaped('\\'),
+                    WordPart::DoubleQuoted(String::new()),
+                    WordPart::Escaped('"'),
+                    WordPart::DoubleQuoted(String::new()),
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_incomplete_constructs_and_unsupported_operators() {
+        let lexer = Lexer::new();
+
+        assert_eq!(lexer.lex("echo \\"), Err(LexerError::IncompleteEscape));
+        assert_eq!(
+            lexer.lex("echo 'open"),
+            Err(LexerError::UnclosedSingleQuote)
+        );
+        assert_eq!(
+            lexer.lex("echo \"open"),
+            Err(LexerError::UnclosedDoubleQuote)
+        );
+        assert_eq!(
+            lexer.lex("a & b"),
+            Err(LexerError::UnsupportedOperator("&"))
+        );
+        assert_eq!(
+            lexer.lex("cat << input"),
+            Err(LexerError::UnsupportedOperator("<<"))
+        );
+    }
+
+    #[test]
+    fn reports_an_io_number_that_does_not_fit_u32() {
+        assert_eq!(
+            Lexer::new().lex("4294967296>output"),
+            Err(LexerError::InvalidIoNumber("4294967296".into()))
+        );
+    }
+
+    #[test]
+    fn state_manager_rejects_pushing_another_base_state() {
+        let mut state = LexerStateManager::new();
+
+        assert_eq!(
+            state.push(LexerState::Normal),
+            Err(LexerStateError::CannotPushBaseState)
+        );
+        assert!(matches!(state.current(), Ok(LexerState::Normal)));
     }
 }
