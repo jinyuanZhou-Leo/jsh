@@ -11,7 +11,7 @@ pub fn type_command(shell: &mut Shell, argv: &[String], io: &mut BuiltinIo<'_>) 
                     writeln!(io.stdout(), "{} is {}", command_name, path.display())?;
                 },
                 None => {
-                    writeln!(io.stdout(), "{}: not found", command_name)?;
+                    writeln!(io.stderr(), "{}: not found", command_name)?;
                 }
             }
 
