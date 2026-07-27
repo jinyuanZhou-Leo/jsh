@@ -1,4 +1,3 @@
-use std::env::args;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::process::CommandExt;
@@ -110,7 +109,7 @@ impl Executor {
         }
     }
 
-    pub(crate) fn execute_builtin(
+    fn execute_builtin(
         &self,
         builtin: BuiltinFn,
         shell: &mut Shell,
@@ -140,13 +139,13 @@ impl Executor {
                 let status = error.status();
 
                 // 此处同样遵守重定向
-                writeln!(io.stderr(), "{error}");
+                writeln!(io.stderr(), "{error}")?;
                 Ok(status)
             }
         }
     }
 
-    pub(crate) fn execute_external(
+    fn execute_external(
         &self,
         executable: &Path,
         command_name: &String,

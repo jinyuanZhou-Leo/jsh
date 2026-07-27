@@ -17,14 +17,6 @@ pub(crate) struct ExpandedCommand {
     pub(crate) redirections: Vec<ExpandedRedirection>,
 }
 
-pub(crate) enum ExpandedAst {
-    Command(ExpandedCommand),
-    AndIf {
-        left: Box<ExpandedAst>,
-        right: Box<ExpandedAst>,
-    },
-}
-
 pub(crate) struct Expander<'env> {
     env: &'env HashMap<String, String>,
 }
@@ -38,7 +30,7 @@ impl<'env> Expander<'env> {
 
     /// 展开Command类型
     pub(crate) fn expand_command(
-        &self,
+        self,
         command: Command,
     ) -> Result<ExpandedCommand, ExpanderError> {
         let Command { args, redirections } = command;
@@ -109,8 +101,8 @@ impl<'env> Expander<'env> {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum ExpanderError {
-    #[error("Could not found env var `{0}`")]
-    EnvironmentVariableNotFound(&'static str),
+    // #[error("Could not found env var `{0}`")]
+    // EnvironmentVariableNotFound(&'static str),
     #[error("Could not derive tilde, please check environment variables")]
     CouldNotExpandTilde,
 }
