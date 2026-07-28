@@ -1,11 +1,12 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
+use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitStatus, Stdio};
+use std::process::{Command as ProcessCommand, ExitStatus};
 
 use crate::builtin::{BuiltinFn, BuiltinIo};
-use crate::expander::{ExpandedRedirection, Expander, ExpanderError};
+use crate::expander::{ExpandedRedirectOperand, ExpandedRedirection, Expander, ExpanderError};
 use crate::parser::Command;
 use crate::shell::ResolvedCommand;
 use crate::token::RedirectOperator;
@@ -13,19 +14,44 @@ use crate::{parser::Ast, shell::Shell};
 use thiserror::Error;
 
 /// Some表示覆盖默认的stdio, None表示继承终端
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct PreparedIo {
-    stdin: Option<File>,
-    stdout: Option<File>,
-    stderr: Option<File>,
+    stdin: File,
+    stdout: File,
+    stderr: File,
 }
 
 impl PreparedIo {
-    fn stderr_writer(&self) -> io::Result<Box<dyn Write>> {
-        match &self.stderr {
-            Some(file) => Ok(Box::new(file.try_clone()?)),
-            None => Ok(Box::new(io::stderr())),
+    fn inherit() -> io::Result<Self> {
+        Ok(Self {
+            stdin: File::from(io::stdin().as_fd().try_clone_to_owned()?),
+            stdout: File::from(io::stdout().as_fd().try_clone_to_owned()?),
+            stderr: File::from(io::stderr().as_fd().try_clone_to_owned()?),
+        })
+    }
+
+    fn try_clone_fd(&self, fd: u32) -> Result<File, ExecutorError> {
+        match fd {
+            0 => Ok(self.stdin.try_clone()?),
+            1 => Ok(self.stdout.try_clone()?),
+            2 => Ok(self.stderr.try_clone()?),
+            _ => Err(ExecutorError::BadFileDescripter { fd }),
         }
+    }
+
+    fn replace_fd_with(&mut self, fd: u32, replacement: File) -> Result<(), ExecutorError> {
+        match fd {
+            0 => self.stdin = replacement,
+            1 => self.stdout = replacement,
+            2 => self.stdin = replacement,
+            _ => return Err(ExecutorError::UnsupportedFileDescriptor { fd }),
+        }
+
+        Ok(())
+    }
+
+    fn stderr_writer(&self) -> io::Result<File> {
+        Ok(self.stderr.try_clone()?)
     }
 }
 
@@ -44,8 +70,15 @@ pub enum ExecutorError {
         source: io::Error,
     },
 
-    #[error("unsupported redirection: fd {fd} with operator {operator:?}")]
-    UnsupportedRedirection { fd: u32, operator: RedirectOperator },
+    #[error("unsupported redirection: fd {redirected_fd} with operator {operator:?}")]
+    UnsupportedRedirection {
+        redirected_fd: u32,
+        operator: RedirectOperator,
+    },
+    #[error("bad file descriptor: {fd}")]
+    BadFileDescripter { fd: u32 },
+    #[error("unsupported file descriptor: {fd}")]
+    UnsupportedFileDescriptor { fd: u32 },
 }
 
 impl Executor {
@@ -116,22 +149,7 @@ impl Executor {
         argv: &[String],
         mut prepared_io: PreparedIo,
     ) -> Result<i32, ExecutorError> {
-        let stdin: &mut dyn Read = match prepared_io.stdin.as_mut() {
-            Some(file) => file,
-            None => &mut io::stdin(),
-        };
-
-        let stdout: &mut dyn Write = match prepared_io.stdout.as_mut() {
-            Some(file) => file,
-            None => &mut io::stdout(),
-        };
-
-        let stderr: &mut dyn Write = match prepared_io.stderr.as_mut() {
-            Some(file) => file,
-            None => &mut io::stderr(),
-        };
-
-        let mut io = BuiltinIo::new(stdin, stdout, stderr);
+        let mut io = BuiltinIo::new(&mut prepared_io.stdin, &mut prepared_io.stdout, &mut prepared_io.stderr);
 
         match builtin(shell, argv, &mut io) {
             Ok(code) => Ok(code),
@@ -156,29 +174,14 @@ impl Executor {
         // 创建一个用于记录错误的stderr_writer
         let mut logger = prepared_io.stderr_writer()?;
 
-        let stdin: Stdio = match prepared_io.stdin {
-            Some(file) => Stdio::from(file),
-            None => Stdio::inherit(),
-        };
-
-        let stdout: Stdio = match prepared_io.stdout {
-            Some(file) => Stdio::from(file),
-            None => Stdio::inherit(),
-        };
-
-        let stderr: Stdio = match prepared_io.stderr {
-            Some(file) => Stdio::from(file),
-            None => Stdio::inherit(),
-        };
-
         let result = ProcessCommand::new(executable)
             .arg0(command_name)
             .args(argv)
             .env_clear()
             .envs(shell.environment())
-            .stdin(stdin)
-            .stdout(stdout)
-            .stderr(stderr)
+            .stdin(prepared_io.stdin)
+            .stdout(prepared_io.stdout)
+            .stderr(prepared_io.stderr)
             .status();
 
         match result {
@@ -202,31 +205,67 @@ impl Executor {
         current_dir: &Path,
         redirections: Vec<ExpandedRedirection>,
     ) -> Result<PreparedIo, ExecutorError> {
-        let mut prepared_io = PreparedIo::default();
+        let mut prepared_io = PreparedIo::inherit()?;
 
         // 按照顺序处理重定向
         // 靠后的重定向会覆盖前面的重定向
         for redirection in redirections {
-            let path = self.resolve_redirection_target(current_dir, &redirection.target);
-
-            match (redirection.fd, redirection.operator) {
-                (0, RedirectOperator::Input) => {
-                    prepared_io.stdin = Some(Self::open_input(&path)?);
+            match (
+                redirection.redirected_fd,
+                redirection.operator,
+                redirection.operand,
+            ) {
+                (
+                    destination_fd,
+                    RedirectOperator::DuplicateInput | RedirectOperator::DuplicateOutput,
+                    ExpandedRedirectOperand::Fd(source_fd),
+                ) => {
+                    prepared_io
+                        .replace_fd_with(destination_fd, prepared_io.try_clone_fd(source_fd)?)?;
                 }
-                (1, RedirectOperator::OutputTruncate) => {
-                    prepared_io.stdout = Some(Self::open_output_truncate(&path)?);
+                (0, RedirectOperator::Input, ExpandedRedirectOperand::Path(path)) => {
+                    prepared_io.replace_fd_with(
+                        0,
+                        Self::open_input(&self.resolve_redirection_path(current_dir, &path))?,
+                    )?;
                 }
-                (2, RedirectOperator::OutputTruncate) => {
-                    prepared_io.stderr = Some(Self::open_output_truncate(&path)?);
+                (1, RedirectOperator::OutputTruncate, ExpandedRedirectOperand::Path(path)) => {
+                    prepared_io.replace_fd_with(
+                        1,
+                        Self::open_output_truncate(
+                            &self.resolve_redirection_path(current_dir, &path),
+                        )?,
+                    )?;
                 }
-                (1, RedirectOperator::OutputAppend) => {
-                    prepared_io.stdout = Some(Self::open_output_append(&path)?);
+                (2, RedirectOperator::OutputTruncate, ExpandedRedirectOperand::Path(path)) => {
+                    prepared_io.replace_fd_with(
+                        2,
+                        Self::open_output_truncate(
+                            &self.resolve_redirection_path(current_dir, &path),
+                        )?,
+                    )?;
                 }
-                (2, RedirectOperator::OutputAppend) => {
-                    prepared_io.stderr = Some(Self::open_output_append(&path)?);
+                (1, RedirectOperator::OutputAppend, ExpandedRedirectOperand::Path(path)) => {
+                    prepared_io.replace_fd_with(
+                        1,
+                        Self::open_output_append(
+                            &self.resolve_redirection_path(current_dir, &path),
+                        )?,
+                    )?;
                 }
-                (fd, operator) => {
-                    return Err(ExecutorError::UnsupportedRedirection { fd, operator });
+                (2, RedirectOperator::OutputAppend, ExpandedRedirectOperand::Path(path)) => {
+                    prepared_io.replace_fd_with(
+                        2,
+                        Self::open_output_append(
+                            &self.resolve_redirection_path(current_dir, &path),
+                        )?,
+                    )?;
+                }
+                (redirected_fd, operator, _) => {
+                    return Err(ExecutorError::UnsupportedRedirection {
+                        redirected_fd,
+                        operator,
+                    });
                 }
             }
         }
@@ -234,24 +273,24 @@ impl Executor {
         Ok(prepared_io)
     }
 
-    /// 将redirection_target转换成绝对路径
+    /// 将重定向路径转换成绝对路径
     ///
     /// # Arguments
     ///
     /// - `current_dir` (`&Path`) - shell当前运行目录
-    /// - `redirection_target` (`&str`) - 重定向目标
+    /// - `redirection_path` (`&str`) - 重定向路径
     ///
     /// # Returns
     ///
     /// - `PathBuf` - 重定向目标的绝对路径
     /// ```
-    fn resolve_redirection_target(&self, current_dir: &Path, redirection_target: &str) -> PathBuf {
-        let target = Path::new(redirection_target);
+    fn resolve_redirection_path(&self, current_dir: &Path, redirection_path: &str) -> PathBuf {
+        let path = Path::new(redirection_path);
 
-        if target.is_absolute() {
-            PathBuf::from(target)
+        if path.is_absolute() {
+            PathBuf::from(path)
         } else {
-            current_dir.join(target)
+            current_dir.join(path)
         }
     }
 
@@ -476,7 +515,7 @@ mod tests {
         assert!(matches!(
             error,
             ExecutorError::UnsupportedRedirection {
-                fd: 3,
+                redirected_fd: 3,
                 operator: crate::token::RedirectOperator::OutputTruncate,
             }
         ));

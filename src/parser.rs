@@ -6,9 +6,10 @@ use crate::token::{RedirectOperator, Token, Word};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct Redirection {
-    pub(crate) fd: u32,
+    pub(crate) redirected_fd: u32,
     pub(crate) operator: RedirectOperator,
-    pub(crate) target: Word,
+    /// 操作符右侧尚未展开的操作数。
+    pub(crate) operand: Word,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -33,8 +34,8 @@ pub(crate) enum ParserError {
     ExpectCommand,
     #[error("expect redirect operator, but found `{found:?}`")]
     ExpectRedirectOperator { found: Option<Token> },
-    #[error("expect redirect target, but found `{found:?}`")]
-    ExpectRedirectTarget { found: Option<Token> },
+    #[error("expect redirection operand, but found `{found:?}`")]
+    ExpectRedirectionOperand { found: Option<Token> },
 }
 
 pub(crate) struct Parser {
@@ -99,7 +100,7 @@ impl Parser {
     }
 
     fn parse_redirection(&mut self) -> Result<Redirection, ParserError> {
-        let fd = match self.tokens.peek() {
+        let redirected_fd = match self.tokens.peek() {
             Some(Token::IoNumber(_)) => {
                 let Some(Token::IoNumber(fd)) = self.tokens.next() else {
                     unreachable!("peek confirmed that the next token exists")
@@ -125,20 +126,20 @@ impl Parser {
             }
         };
 
-        let target = match self.tokens.next() {
+        let operand = match self.tokens.next() {
             Some(Token::Word(word)) => word,
             Some(token) => {
-                return Err(ParserError::ExpectRedirectTarget { found: Some(token) });
+                return Err(ParserError::ExpectRedirectionOperand { found: Some(token) });
             }
             None => {
-                return Err(ParserError::ExpectRedirectTarget { found: None });
+                return Err(ParserError::ExpectRedirectionOperand { found: None });
             }
         };
 
         Ok(Redirection {
-            fd,
+            redirected_fd,
             operator,
-            target,
+            operand,
         })
     }
 
@@ -202,19 +203,19 @@ mod tests {
                 args: vec![word("cat"), word("input")],
                 redirections: vec![
                     Redirection {
-                        fd: 2,
+                        redirected_fd: 2,
                         operator: RedirectOperator::OutputAppend,
-                        target: word("error"),
+                        operand: word("error"),
                     },
                     Redirection {
-                        fd: 1,
+                        redirected_fd: 1,
                         operator: RedirectOperator::OutputTruncate,
-                        target: word("output"),
+                        operand: word("output"),
                     },
                     Redirection {
-                        fd: 0,
+                        redirected_fd: 0,
                         operator: RedirectOperator::Input,
-                        target: word("source"),
+                        operand: word("source"),
                     },
                 ],
             })
@@ -228,9 +229,24 @@ mod tests {
             Ok(Some(Ast::Command(Command {
                 args: vec![],
                 redirections: vec![Redirection {
-                    fd: 1,
+                    redirected_fd: 1,
                     operator: RedirectOperator::OutputTruncate,
-                    target: word("output"),
+                    operand: word("output"),
+                }],
+            })))
+        );
+    }
+
+    #[test]
+    fn keeps_redirection_operand_unexpanded() {
+        assert_eq!(
+            parse("echo 2>&1"),
+            Ok(Some(Ast::Command(Command {
+                args: vec![word("echo")],
+                redirections: vec![Redirection {
+                    redirected_fd: 2,
+                    operator: RedirectOperator::DuplicateOutput,
+                    operand: word("1"),
                 }],
             })))
         );
@@ -275,7 +291,7 @@ mod tests {
         );
         assert_eq!(
             parse("echo >"),
-            Err(ParserError::ExpectRedirectTarget { found: None })
+            Err(ParserError::ExpectRedirectionOperand { found: None })
         );
         assert_eq!(
             Parser::new(vec![
@@ -283,7 +299,7 @@ mod tests {
                 Token::AndAnd,
             ])
             .parse(),
-            Err(ParserError::ExpectRedirectTarget {
+            Err(ParserError::ExpectRedirectionOperand {
                 found: Some(Token::AndAnd),
             })
         );

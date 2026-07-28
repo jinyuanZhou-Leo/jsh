@@ -7,9 +7,15 @@ use crate::{
 };
 
 pub(crate) struct ExpandedRedirection {
-    pub(crate) fd: u32,
+    pub(crate) redirected_fd: u32,
     pub(crate) operator: RedirectOperator,
-    pub(crate) target: String,
+    pub(crate) operand: ExpandedRedirectOperand,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExpandedRedirectOperand {
+    Fd(u32),
+    Path(String),
 }
 
 pub(crate) struct ExpandedCommand {
@@ -29,25 +35,43 @@ impl<'env> Expander<'env> {
     }
 
     /// 展开Command类型
-    pub(crate) fn expand_command(
-        self,
-        command: Command,
-    ) -> Result<ExpandedCommand, ExpanderError> {
+    pub(crate) fn expand_command(self, command: Command) -> Result<ExpandedCommand, ExpanderError> {
         let Command { args, redirections } = command;
 
         // 展开过程不会改变数组长度，使用with_capacity减少不必要的堆内存分配
         let mut expanded_args = Vec::with_capacity(args.len());
         let mut expanded_redirections = Vec::with_capacity(redirections.len());
 
+        // Word 展开
         for word in args {
             expanded_args.push(self.expand_word(word)?);
         }
 
+        // 重定向展开
         for redirection in redirections {
+            let operator = redirection.operator;
+            // 先做operand展开然后在尝试解析具体的重定向行为
+            let expanded_operand = self.expand_word(redirection.operand)?;
+            let operand = match operator {
+                RedirectOperator::DuplicateInput | RedirectOperator::DuplicateOutput => {
+                    // 解析右侧fd
+                    let fd = expanded_operand.parse::<u32>().map_err(|_| {
+                        ExpanderError::InvalidFileDescriptor(expanded_operand.clone())
+                    })?;
+                    ExpandedRedirectOperand::Fd(fd)
+                }
+                RedirectOperator::Input
+                | RedirectOperator::OutputTruncate
+                | RedirectOperator::OutputAppend => {
+                    // 输入输出重定向，存入文件路径
+                    ExpandedRedirectOperand::Path(expanded_operand)
+                },
+            };
+
             expanded_redirections.push(ExpandedRedirection {
-                fd: redirection.fd,
-                operator: redirection.operator,
-                target: self.expand_word(redirection.target)?,
+                redirected_fd: redirection.redirected_fd,
+                operator,
+                operand,
             });
         }
 
@@ -105,13 +129,15 @@ pub(crate) enum ExpanderError {
     // EnvironmentVariableNotFound(&'static str),
     #[error("Could not derive tilde, please check environment variables")]
     CouldNotExpandTilde,
+    #[error("invalid file descriptor `{0}`")]
+    InvalidFileDescriptor(String),
 }
 
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, env::home_dir, sync::OnceLock};
 
-    use super::Expander;
+    use super::{ExpandedRedirectOperand, Expander};
     use crate::{
         parser::{Command, Redirection},
         token::{RedirectOperator, Word, WordPart},
@@ -168,16 +194,16 @@ mod tests {
     }
 
     #[test]
-    fn expands_command_arguments_and_redirection_targets() {
+    fn expands_command_arguments_and_redirection_operands() {
         let command = Command {
             args: vec![
                 Word::from_parts(vec![WordPart::Unquoted("echo".into())]),
                 Word::from_parts(vec![WordPart::SingleQuoted("hello world".into())]),
             ],
             redirections: vec![Redirection {
-                fd: 2,
+                redirected_fd: 2,
                 operator: RedirectOperator::OutputAppend,
-                target: Word::from_parts(vec![WordPart::Unquoted("error.log".into())]),
+                operand: Word::from_parts(vec![WordPart::Unquoted("error.log".into())]),
             }],
         };
 
@@ -187,11 +213,63 @@ mod tests {
 
         assert_eq!(expanded.args, vec!["echo", "hello world"]);
         assert_eq!(expanded.redirections.len(), 1);
-        assert_eq!(expanded.redirections[0].fd, 2);
+        assert_eq!(expanded.redirections[0].redirected_fd, 2);
         assert_eq!(
             expanded.redirections[0].operator,
             RedirectOperator::OutputAppend
         );
-        assert_eq!(expanded.redirections[0].target, "error.log");
+        assert_eq!(
+            expanded.redirections[0].operand,
+            ExpandedRedirectOperand::Path("error.log".into())
+        );
+    }
+
+    #[test]
+    fn resolves_redirection_operands_according_to_the_operator() {
+        let command = Command {
+            args: vec![],
+            redirections: vec![
+                Redirection {
+                    redirected_fd: 1,
+                    operator: RedirectOperator::OutputTruncate,
+                    operand: Word::from_parts(vec![WordPart::Unquoted("2".into())]),
+                },
+                Redirection {
+                    redirected_fd: 2,
+                    operator: RedirectOperator::DuplicateOutput,
+                    operand: Word::from_parts(vec![WordPart::Unquoted("1".into())]),
+                },
+            ],
+        };
+
+        let expanded = expander()
+            .expand_command(command)
+            .expect("redirection operands should resolve");
+
+        assert_eq!(
+            expanded.redirections[0].operand,
+            ExpandedRedirectOperand::Path("2".into())
+        );
+        assert_eq!(
+            expanded.redirections[1].operand,
+            ExpandedRedirectOperand::Fd(1)
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_numeric_file_descriptor_after_expansion() {
+        let command = Command {
+            args: vec![],
+            redirections: vec![Redirection {
+                redirected_fd: 2,
+                operator: RedirectOperator::DuplicateOutput,
+                operand: Word::from_parts(vec![WordPart::Unquoted("stdout".into())]),
+            }],
+        };
+
+        assert_eq!(
+            expander().expand_command(command).map(|_| ()),
+            Err(super::ExpanderError::InvalidFileDescriptor("stdout".into()))
+        );
     }
 }

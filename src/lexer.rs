@@ -2,7 +2,7 @@ use std::mem;
 use thiserror::Error;
 
 use crate::token::{
-    RedirectOperator::{Input, OutputAppend, OutputTruncate},
+    RedirectOperator::{DuplicateInput, DuplicateOutput, Input, OutputAppend, OutputTruncate},
     Token, Word, WordPart,
 };
 
@@ -59,6 +59,12 @@ impl Lexer {
                                 // >> 追加写入
                                 Token::Redirect(OutputAppend)
                             }
+                            ('>', Some('&')) => {
+                                // 消费下一个char
+                                source.next();
+                                // 文件描述符复制或关闭
+                                Token::Redirect(DuplicateOutput)
+                            }
                             ('>', _) => {
                                 // > 覆盖写入
                                 Token::Redirect(OutputTruncate)
@@ -67,6 +73,12 @@ impl Lexer {
                                 //TODO: Here-doc
                                 return Err(LexerError::UnsupportedOperator("<<"));
                             }
+                            ('<', Some('&')) => {
+                                // 消费下一个char
+                                source.next();
+                                // 输入fd复制
+                                Token::Redirect(DuplicateInput)
+                            }
                             ('<', _) => {
                                 // 读入
                                 Token::Redirect(Input)
@@ -74,6 +86,7 @@ impl Lexer {
                             _ => unreachable!("this branch only handles `<` and `>`"),
                         };
 
+                        // 重定向操作符右侧始终按 Word 继续词法分析，具体含义在展开后确定。
                         tokens.push(token);
                     }
                     '&' => {
@@ -431,6 +444,26 @@ mod tests {
                 word(vec![WordPart::SingleQuoted("2".into())]),
                 Token::Redirect(RedirectOperator::OutputTruncate),
                 word(vec![WordPart::Unquoted("output".into())]),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_file_descriptor_duplication_rhs_as_a_word() {
+        let tokens = Lexer::new()
+            .lex("echo 2>&1 0<&3")
+            .expect("file descriptor duplication should lex");
+
+        assert_eq!(
+            tokens,
+            vec![
+                word(vec![WordPart::Unquoted("echo".into())]),
+                Token::IoNumber(2),
+                Token::Redirect(RedirectOperator::DuplicateOutput),
+                word(vec![WordPart::Unquoted("1".into())]),
+                Token::IoNumber(0),
+                Token::Redirect(RedirectOperator::DuplicateInput),
+                word(vec![WordPart::Unquoted("3".into())]),
             ]
         );
     }
