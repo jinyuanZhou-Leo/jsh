@@ -7,11 +7,10 @@ mod parser;
 mod shell;
 mod token;
 use std::{
-    collections::HashMap,
-    env,
-    io::{self, Write},
+    collections::HashMap, env, error::Error, io::{self, Write},
 };
 
+use rustyline::error::ReadlineError;
 use thiserror::Error;
 
 use crate::{
@@ -42,18 +41,24 @@ fn main() -> Result<(), ReplError> {
 
     let mut executor = Executor::new();
 
-    while !shell.exit_requested() {
-        print!("$ ");
-        io::stdout().flush().map_err(ReplError::FlushPrompt)?;
+    let mut editor = rustyline::DefaultEditor::new().map_err(|_| ReplError::InitializeEditor)?;
 
+    while !shell.exit_requested() {
         // 读取用户输入
-        let mut source = String::new();
-        match io::stdin().read_line(&mut source) {
-            // 读入内容长度为 0 bytes
-            Ok(0) => break,
-            // 正常情况
-            Ok(_) => {}
-            Err(e) => return Err(ReplError::ReadLine(e)),
+        let source = match editor.readline("$ ") {
+            Ok(source) => source,
+            Err(ReadlineError::Eof) => {
+                // Ctrl/Cmd + D 退出终端
+                shell.request_exit(0);
+                continue;
+            },
+            Err(ReadlineError::Interrupted) => {
+                // 输入被打断，进入下一次循环
+                continue;
+            },
+            Err(error) => {
+                return Err(ReplError::ReadLine(error));
+            },
         };
 
         match execute_line(&mut shell, &mut executor, &source.trim_end()) {
@@ -93,7 +98,9 @@ pub(crate) enum ReplError {
     #[error("failed to get current directory: {0}")]
     CurrentDirectory(#[source] std::io::Error),
     #[error("failed to read line")]
-    ReadLine(#[source] std::io::Error),
+    ReadLine(#[source] ReadlineError),
+    #[error("failed to initialize editor")]
+    InitializeEditor,
 }
 
 #[derive(Debug, Error)]
