@@ -5,6 +5,8 @@ pub(crate) enum Token {
     IoNumber(u32),
     // &&
     AndAnd,
+    OrOr,
+    Pipeline
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

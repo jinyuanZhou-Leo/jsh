@@ -22,6 +22,7 @@ impl CommandLoader {
     }
 
     pub fn find_executable(&self, cmd: &str) -> Option<PathBuf> {
+        // 遍历PATH中的目录，找executable
         for dir in &self.path {
             let candidate = dir.join(cmd);
 
