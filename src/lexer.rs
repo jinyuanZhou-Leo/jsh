@@ -25,6 +25,9 @@ pub struct Lexer<'src> {
 }
 
 impl<'src> Lexer<'src> {
+    /// 创建一次性词法分析器，并借用待分析的源文本。
+    ///
+    /// 每个 `Lexer` 实例只负责一段源文本；调用 [`Lexer::lex`] 后实例会被消费。
     pub fn new(source: &'src str) -> Self {
         Self {
             tokens: Vec::new(),
@@ -34,6 +37,15 @@ impl<'src> Lexer<'src> {
         }
     }
 
+    /// 将源文本转换为有序的 Token 序列。
+    ///
+    /// 该方法按照当前状态分派字符，保留引号和转义形成的 [`WordPart`] 边界，
+    /// 并在重定向操作符前识别紧邻的文件描述符数字。
+    ///
+    /// # Errors
+    ///
+    /// 当输入包含未闭合引号、不完整转义、不支持的操作符、无效文件描述符，
+    /// 或 Lexer 状态栈违反内部不变量时返回 [`LexerError`]。
     pub fn lex(mut self) -> Result<Vec<Token>, LexerError> {
         while let Some(this_char) = self.source.next() {
             match self.state.current()? {
@@ -47,12 +59,15 @@ impl<'src> Lexer<'src> {
             LexerState::InDoubleQuote => Err(LexerError::UnclosedDoubleQuote),
             LexerState::InSingleQuote => Err(LexerError::UnclosedSingleQuote),
             LexerState::Normal => {
-                 self.finish_word();
-                 Ok(self.tokens)
-            }, // TODO: 用mem::take
+                self.finish_word();
+                Ok(self.tokens)
+            }
         }
     }
 
+    /// 处理 `Normal` 状态下已经从输入流取出的一个字符。
+    ///
+    /// 复合操作符和转义序列可能会额外消费一个后继字符。
     fn lex_normal(&mut self, this_char: char) -> Result<(), LexerError> {
         match this_char {
             '\'' => {
@@ -83,7 +98,7 @@ impl<'src> Lexer<'src> {
                         // > 覆盖写入
                         Token::Redirect(OutputTruncate)
                     }
-                    '<' if self.consume_next_if('<')=> {
+                    '<' if self.consume_next_if('<') => {
                         //TODO: Here-doc
                         return Err(LexerError::UnsupportedOperator("<<"));
                     }
@@ -140,6 +155,9 @@ impl<'src> Lexer<'src> {
         Ok(())
     }
 
+    /// 处理单引号状态下的一个字符，并在遇到闭合单引号时提交 quoted part。
+    ///
+    /// 空单引号仍会产生一个空的 [`WordPart::SingleQuoted`]，以保留空参数语义。
     fn lex_single_quoted(&mut self, this_char: char) -> Result<(), LexerError> {
         match this_char {
             '\'' => {
@@ -160,6 +178,10 @@ impl<'src> Lexer<'src> {
         Ok(())
     }
 
+    /// 处理双引号状态下的一个字符。
+    ///
+    /// 双引号内仅 `"`、`\\`、`$` 和反引号可以被反斜杠转义；反斜杠加换行
+    /// 被作为行续接丢弃，其他反斜杠按字面量保留。
     fn lex_double_quoted(&mut self, this_char: char) -> Result<(), LexerError> {
         match this_char {
             '\"' => {
@@ -202,30 +224,39 @@ impl<'src> Lexer<'src> {
         Ok(())
     }
 
-    /// 如果下一个Token是expected则消费并返回true
+    /// 如果输入流的下一个字符等于 `expected`，则消费该字符并返回 `true`。
     ///
-    /// # Arguments
-    ///
-    /// - `expected` (`char`) - 下一个字符的期望值
-    ///
-    /// # Returns
-    ///
-    /// - `bool` - 符合期望则返回true, 否则返回false
+    /// 不匹配或输入已经结束时返回 `false`，且不会推进输入流。
     fn consume_next_if(&mut self, expected: char) -> bool {
         self.source.next_if_eq(&expected).is_some()
     }
 
+    /// 结束当前 Word，并提交一个控制操作符 Token。
+    ///
+    /// 该方法用于 `&&`、`||` 和管道；重定向必须使用
+    /// [`Lexer::finish_before_redirect`] 保留 IO number 识别语义。
     fn emit_control_operator(&mut self, token: Token) {
         self.finish_word();
         self.tokens.push(token);
     }
 
+    /// 如果当前正在构建 Word，则结束构建并提交 [`Token::Word`]。
+    ///
+    /// 尚未开始 Word 时不产生任何 Token。
     fn finish_word(&mut self) {
         if let Some(builder) = self.current_word.take() {
             self.tokens.push(Token::Word(builder.finish()));
         }
     }
 
+    /// 在重定向操作符前结束当前 Word，并提交 Word 或 IO number Token。
+    ///
+    /// 只有完全由未引用 ASCII 数字组成、且紧邻重定向操作符的内容才会成为
+    /// [`Token::IoNumber`]；其他内容仍作为 [`Token::Word`] 提交。
+    ///
+    /// # Errors
+    ///
+    /// 当数字超出 `u32` 范围时返回 [`LexerError::InvalidIoNumber`]。
     fn finish_before_redirect(&mut self) -> Result<(), LexerError> {
         if let Some(builder) = self.current_word.take() {
             self.tokens.push(builder.finish_before_redirect()?);
@@ -234,7 +265,7 @@ impl<'src> Lexer<'src> {
     }
 }
 
-/// 用于构建Word对象的工具类
+/// 增量构建一个 [`Word`]，并保留未引用、引用和转义部分的边界。
 #[derive(Debug, Default)]
 struct WordBuilder {
     parts: Vec<WordPart>, // 解析完成的WordPart
@@ -242,13 +273,14 @@ struct WordBuilder {
 }
 
 impl WordBuilder {
-    /// 把字符压入WordBuilder缓冲区
+    /// 将一个普通字符追加到当前尚未提交的 part 缓冲区。
     fn push_char(&mut self, c: char) {
         self.buffer.push(c);
     }
 
-    /// 结束一个Unquoted Part
-    /// 取出缓冲区内容，创建一个WordPart::Unquoted，放入parts
+    /// 提交当前非空缓冲区为 [`WordPart::Unquoted`]。
+    ///
+    /// 空缓冲区不会产生 part，因为未引用的空内容不代表一个 shell 参数。
     fn finish_unquoted_part(&mut self) {
         if self.buffer.is_empty() {
             // 当缓冲区为空的时候不做任何操作
@@ -259,21 +291,30 @@ impl WordBuilder {
             .push(WordPart::Unquoted(mem::take(&mut self.buffer)));
     }
 
-    /// 提交一个SingleQuoted Part
-    /// 取出缓冲区内容，创建一个WordPart::SingleQuoted，放入parts
+    /// 提交当前缓冲区为 [`WordPart::SingleQuoted`]。
+    ///
+    /// 即使缓冲区为空也会提交，以保留 `''` 表示空参数的语义。
     fn finish_single_quoted_part(&mut self) {
         self.parts
             .push(WordPart::SingleQuoted(mem::take(&mut self.buffer)));
     }
 
-    /// 提交一个DoubleQuoted Part
-    /// 取出缓冲区内容，创建一个WordPart::DoubleQuoted，放入parts
+    /// 提交当前缓冲区为 [`WordPart::DoubleQuoted`]。
+    ///
+    /// 即使缓冲区为空也会提交，以保留 `""` 表示空参数的语义。
     fn finish_double_quoted_part(&mut self) {
         self.parts
             .push(WordPart::DoubleQuoted(mem::take(&mut self.buffer)));
     }
 
-    ///在重定向前完成WordBuilder处理,返回Token
+    /// 在重定向操作符前结束构建，并将结果分类为 IO number 或普通 Word。
+    ///
+    /// 只有尚未产生 quoted/escaped part 且缓冲区为纯 ASCII 数字时，结果才是
+    /// [`Token::IoNumber`]。
+    ///
+    /// # Errors
+    ///
+    /// 当纯数字内容不能表示为 `u32` 时返回 [`LexerError::InvalidIoNumber`]。
     fn finish_before_redirect(mut self) -> Result<Token, LexerError> {
         // 如果有且仅有buffer不为空，且为纯数字，则解析为IONumber
         let is_io_number = self.parts.is_empty()
@@ -294,19 +335,21 @@ impl WordBuilder {
         Ok(Token::Word(self.finish()))
     }
 
-    /// 直接向parts中提交一个 Escaped Part (一个字符)
+    /// 结束已有的未引用片段，并提交一个受保护的转义字符。
     fn push_escaped(&mut self, c: char) {
         self.finish_unquoted_part(); // 因为转义符只在非单双引号出现，且为单字符，所以要先清空缓冲区
 
         self.parts.push(WordPart::Escaped(c));
     }
 
+    /// 结束已有的双引号片段，并提交一个双引号内的转义字符。
     fn push_double_quoted_escaped(&mut self, c: char) {
         self.finish_double_quoted_part();
 
         self.parts.push(WordPart::Escaped(c));
     }
 
+    /// 结束最后一个未引用片段，并消费 builder 生成完整的 [`Word`]。
     fn finish(mut self) -> Word {
         self.finish_unquoted_part();
 
@@ -319,12 +362,18 @@ struct LexerStateManager {
 }
 
 impl LexerStateManager {
+    /// 创建以 [`LexerState::Normal`] 为不可弹出基础状态的状态栈。
     fn new() -> Self {
         LexerStateManager {
             state_stack: vec![LexerState::Normal],
         }
     }
 
+    /// 将一个非基础状态压入状态栈。
+    ///
+    /// # Errors
+    ///
+    /// 传入 [`LexerState::Normal`] 时返回 [`LexerStateError::CannotPushBaseState`]。
     fn push(&mut self, state: LexerState) -> Result<(), LexerStateError> {
         if matches!(state, LexerState::Normal) {
             return Err(LexerStateError::CannotPushBaseState);
@@ -334,6 +383,11 @@ impl LexerStateManager {
         Ok(())
     }
 
+    /// 弹出当前 quote 状态，同时保证基础 `Normal` 状态始终保留。
+    ///
+    /// # Errors
+    ///
+    /// 状态栈为空，或调用将弹出基础状态时返回对应的 [`LexerStateError`]。
     fn pop_quote_state(&mut self) -> Result<(), LexerStateError> {
         match self.state_stack.len() {
             0 => Err(LexerStateError::EmptyStack),
@@ -345,8 +399,16 @@ impl LexerStateManager {
         }
     }
 
+    /// 返回当前栈顶状态的副本。
+    ///
+    /// # Errors
+    ///
+    /// 状态栈违反不变量并变为空栈时返回 [`LexerStateError::EmptyStack`]。
     fn current(&self) -> Result<LexerState, LexerStateError> {
-        self.state_stack.last().ok_or(LexerStateError::EmptyStack).copied()
+        self.state_stack
+            .last()
+            .ok_or(LexerStateError::EmptyStack)
+            .copied()
     }
 }
 

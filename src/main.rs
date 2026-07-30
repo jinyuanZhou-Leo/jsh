@@ -22,10 +22,7 @@ use crate::{
 
 fn main() -> Result<(), ReplError> {
     // 读取环境变量
-    let mut env = HashMap::new();
-    for (k, v) in env::vars() {
-        env.insert(k, v);
-    }
+    let env = env::vars().collect();
 
     let mut shell = Shell::new(
         env::current_dir().map_err(ReplError::CurrentDirectory)?,
@@ -61,7 +58,7 @@ fn main() -> Result<(), ReplError> {
             },
         };
 
-        match execute_line(&mut shell, &mut executor, &source.trim_end()) {
+        match execute_line(&mut shell, &mut executor, &source) {
             Ok(code) => {
                 shell.set_last_status(code);
             },
