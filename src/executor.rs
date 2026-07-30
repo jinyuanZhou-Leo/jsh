@@ -415,7 +415,7 @@ mod tests {
         shell: &mut Shell,
         source: &str,
     ) -> Result<i32, ExecutorError> {
-        let tokens = Lexer::new().lex(source).expect("test input should lex");
+        let tokens = Lexer::new(source).lex().expect("test input should lex");
         let ast = Parser::new(tokens)
             .parse()
             .expect("test input should parse")

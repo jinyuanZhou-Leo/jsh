@@ -80,8 +80,7 @@ fn execute_line(
     executor: &mut Executor,
     source: &str,
 ) -> Result<i32, EvalError> {
-    let lexer = Lexer::new();
-    let tokens = lexer.lex(&source)?;
+    let tokens = Lexer::new(source).lex()?;
 
     let Some(ast) = Parser::new(tokens).parse()? else {
         // Ast为空，空输入返回0

@@ -166,6 +166,10 @@ impl Parser {
 
         Ok(left)
     }
+
+    fn parse_pipeline(&mut self) -> Result<T, E> {
+        
+    }
 }
 
 #[cfg(test)]
@@ -181,7 +185,7 @@ mod tests {
     }
 
     fn parse(source: &str) -> Result<Option<Ast>, ParserError> {
-        let tokens = Lexer::new().lex(source).expect("test input should lex");
+        let tokens = Lexer::new(source).lex().expect("test input should lex");
         Parser::new(tokens).parse()
     }
 

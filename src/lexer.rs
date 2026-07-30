@@ -34,7 +34,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    pub fn lex(&mut self) -> Result<Vec<Token>, LexerError> {
+    pub fn lex(mut self) -> Result<Vec<Token>, LexerError> {
         while let Some(this_char) = self.source.next() {
             match self.state.current()? {
                 LexerState::Normal => self.lex_normal(this_char)?,
@@ -43,12 +43,13 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        self.finish_word();
-        
         match self.state.current()? {
             LexerState::InDoubleQuote => Err(LexerError::UnclosedDoubleQuote),
             LexerState::InSingleQuote => Err(LexerError::UnclosedSingleQuote),
-            LexerState::Normal => Ok(self.tokens.clone()), // TODO: 用mem::take
+            LexerState::Normal => {
+                 self.finish_word();
+                 Ok(self.tokens)
+            }, // TODO: 用mem::take
         }
     }
 
@@ -67,39 +68,30 @@ impl<'src> Lexer<'src> {
                 self.state.push(LexerState::InDoubleQuote)?;
             }
             '>' | '<' => {
-                let next_char = self.source.peek().copied();
-                // ! 此处用take将current消费掉
                 self.finish_before_redirect()?;
 
-                let token = match (this_char, next_char) {
-                    ('>', Some('>')) => {
-                        // 消费下一个char
-                        self.source.next();
-
+                let token = match this_char {
+                    '>' if self.consume_next_if('>') => {
                         // >> 追加写入
                         Token::Redirect(OutputAppend)
                     }
-                    ('>', Some('&')) => {
-                        // 消费下一个char
-                        self.source.next();
+                    '>' if self.consume_next_if('&') => {
                         // 文件描述符复制或关闭
                         Token::Redirect(DuplicateOutput)
                     }
-                    ('>', _) => {
+                    '>' => {
                         // > 覆盖写入
                         Token::Redirect(OutputTruncate)
                     }
-                    ('<', Some('<')) => {
+                    '<' if self.consume_next_if('<')=> {
                         //TODO: Here-doc
                         return Err(LexerError::UnsupportedOperator("<<"));
                     }
-                    ('<', Some('&')) => {
-                        // 消费下一个char
-                        self.source.next();
+                    '<' if self.consume_next_if('&') => {
                         // 输入fd复制
                         Token::Redirect(DuplicateInput)
                     }
-                    ('<', _) => {
+                    '<' => {
                         // 读入
                         Token::Redirect(Input)
                     }
@@ -112,11 +104,7 @@ impl<'src> Lexer<'src> {
             '&' => {
                 if self.consume_next_if('&') {
                     // AndAnd
-                    // 先提交 WordBuild 中未提交的内容
-                    self.finish_word();
-
-                    // 然后提交AndAnd
-                    self.tokens.push(Token::AndAnd);
+                    self.emit_control_operator(Token::AndAnd);
                 } else {
                     // TODO: Background
                     return Err(LexerError::UnsupportedOperator("&"));
@@ -125,14 +113,10 @@ impl<'src> Lexer<'src> {
             '|' => {
                 if self.consume_next_if('|') {
                     // OrOr
-                    self.finish_word();
-
-                    self.tokens.push(Token::OrOr);
+                    self.emit_control_operator(Token::OrOr);
                 } else {
                     // Pipeline
-                    self.finish_word();
-
-                    self.tokens.push(Token::Pipeline);
+                    self.emit_control_operator(Token::Pipeline);
                 }
             }
             '\\' => {
@@ -362,7 +346,7 @@ impl LexerStateManager {
     }
 
     fn current(&self) -> Result<LexerState, LexerStateError> {
-        self.state_stack.last().ok_or(LexerStateError::EmptyStack)
+        self.state_stack.last().ok_or(LexerStateError::EmptyStack).copied()
     }
 }
 
@@ -431,16 +415,14 @@ mod tests {
 
     #[test]
     fn closing_quotes_does_not_fail_lexing() {
-        let lexer = Lexer::new();
-
-        assert!(lexer.lex("echo 'hello'").is_ok());
-        assert!(lexer.lex("echo \"hello\"").is_ok());
+        assert!(Lexer::new("echo 'hello'").lex().is_ok());
+        assert!(Lexer::new("echo \"hello\"").lex().is_ok());
     }
 
     #[test]
     fn lexes_word_parts_without_losing_quote_boundaries() {
-        let tokens = Lexer::new()
-            .lex("echo pre'single'\"double\"\\ value '' \"\"")
+        let tokens = Lexer::new("echo pre'single'\"double\"\\ value '' \"\"")
+            .lex()
             .expect("valid quoting should lex");
 
         assert_eq!(
@@ -462,8 +444,8 @@ mod tests {
 
     #[test]
     fn lexes_redirections_io_numbers_and_and_if() {
-        let tokens = Lexer::new()
-            .lex("cat 0<input 2>>error && echo done > output")
+        let tokens = Lexer::new("cat 0<input 2>>error && echo done > output")
+            .lex()
             .expect("valid operators should lex");
 
         assert_eq!(
@@ -487,8 +469,8 @@ mod tests {
 
     #[test]
     fn a_quoted_number_before_redirect_is_a_word() {
-        let tokens = Lexer::new()
-            .lex("'2'>output")
+        let tokens = Lexer::new("'2'>output")
+            .lex()
             .expect("quoted number should lex");
 
         assert_eq!(
@@ -503,8 +485,8 @@ mod tests {
 
     #[test]
     fn keeps_file_descriptor_duplication_rhs_as_a_word() {
-        let tokens = Lexer::new()
-            .lex("echo 2>&1 0<&3")
+        let tokens = Lexer::new("echo 2>&1 0<&3")
+            .lex()
             .expect("file descriptor duplication should lex");
 
         assert_eq!(
@@ -523,8 +505,8 @@ mod tests {
 
     #[test]
     fn double_quotes_only_escape_supported_characters() {
-        let tokens = Lexer::new()
-            .lex(r#"echo "\$x\q\\\"""#)
+        let tokens = Lexer::new(r#"echo "\$x\q\\\"""#)
+            .lex()
             .expect("double-quoted escapes should lex");
 
         assert_eq!(
@@ -546,23 +528,24 @@ mod tests {
 
     #[test]
     fn reports_incomplete_constructs_and_unsupported_operators() {
-        let lexer = Lexer::new();
-
-        assert_eq!(lexer.lex("echo \\"), Err(LexerError::IncompleteEscape));
         assert_eq!(
-            lexer.lex("echo 'open"),
+            Lexer::new("echo \\").lex(),
+            Err(LexerError::IncompleteEscape)
+        );
+        assert_eq!(
+            Lexer::new("echo 'open").lex(),
             Err(LexerError::UnclosedSingleQuote)
         );
         assert_eq!(
-            lexer.lex("echo \"open"),
+            Lexer::new("echo \"open").lex(),
             Err(LexerError::UnclosedDoubleQuote)
         );
         assert_eq!(
-            lexer.lex("a & b"),
+            Lexer::new("a & b").lex(),
             Err(LexerError::UnsupportedOperator("&"))
         );
         assert_eq!(
-            lexer.lex("cat << input"),
+            Lexer::new("cat << input").lex(),
             Err(LexerError::UnsupportedOperator("<<"))
         );
     }
@@ -570,7 +553,7 @@ mod tests {
     #[test]
     fn reports_an_io_number_that_does_not_fit_u32() {
         assert_eq!(
-            Lexer::new().lex("4294967296>output"),
+            Lexer::new("4294967296>output").lex(),
             Err(LexerError::InvalidIoNumber("4294967296".into()))
         );
     }
