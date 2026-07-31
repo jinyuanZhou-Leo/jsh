@@ -13,7 +13,6 @@ use crate::token::RedirectOperator;
 use crate::{parser::Ast, shell::Shell};
 use thiserror::Error;
 
-/// Some表示覆盖默认的stdio, None表示继承终端
 #[derive(Debug)]
 struct PreparedIo {
     stdin: File,
@@ -107,6 +106,19 @@ impl Executor {
                     // 否则不执行右侧指令，返回左侧结果
                     Ok(status)
                 }
+            },
+            Ast::OrIf { left, right } => {
+                let status = self.execute_ast(shell, *left)?;
+
+                // 如果左侧指令没有成功执行, 且shell没有被要求关闭， 则继续执行右侧ast
+                if status != 0 && !shell.exit_requested() {
+                    self.execute_ast(shell, *right)
+                } else {
+                    Ok(status)
+                }
+            },
+            Ast::Pipeline { commands } => {
+                todo!()
             }
         }
     }

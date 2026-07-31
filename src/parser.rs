@@ -22,6 +22,10 @@ pub(crate) struct Command {
 pub(crate) enum Ast {
     Command(Command),
     AndIf { left: Box<Ast>, right: Box<Ast> },
+    OrIf {left: Box<Ast>, right: Box<Ast>},
+    Pipeline{
+        commands: Vec<Command>
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -30,6 +34,8 @@ pub(crate) enum ParserError {
     UnexpectedToken(Token),
     #[error("missing command after &&")]
     MissingCommandAfterAndIf,
+    #[error("missing command after ||")]
+    MissingCommandAfterOrIf,
     #[error("expect command but get nothing")]
     ExpectCommand,
     #[error("expect redirect operator, but found `{found:?}`")]
@@ -56,7 +62,7 @@ impl Parser {
             return Ok(None);
         }
 
-        let ast = self.parse_and_if()?;
+        let ast = self.parse_and_or()?;
 
         // 检查是否存在parser未消费的剩余Token
         if let Some(token) = self.tokens.next() {
@@ -66,7 +72,7 @@ impl Parser {
         Ok(Some(ast))
     }
 
-    fn parse_command(&mut self) -> Result<Ast, ParserError> {
+    fn parse_command(&mut self) -> Result<Command, ParserError> {
         let mut command = Vec::new();
         let mut redirections = Vec::new();
 
@@ -81,8 +87,8 @@ impl Parser {
                 Some(Token::IoNumber(_) | Token::Redirect(_)) => {
                     redirections.push(self.parse_redirection()?);
                 }
-                // 当遇到 Token::AndAnd说明当前Command已经结束
-                Some(Token::AndAnd) | None => {
+                // 当遇到这些说明当前Command已经结束
+                Some(Token::AndAnd) | Some(Token::OrOr) | Some(Token::Pipeline) | None => {
                     break;
                 }
             }
@@ -93,10 +99,10 @@ impl Parser {
             return Err(ParserError::ExpectCommand);
         }
 
-        Ok(Ast::Command(Command {
+        Ok(Command {
             args: command,
             redirections,
-        }))
+        })
     }
 
     fn parse_redirection(&mut self) -> Result<Redirection, ParserError> {
@@ -143,32 +149,49 @@ impl Parser {
         })
     }
 
-    fn parse_and_if(&mut self) -> Result<Ast, ParserError> {
+    fn parse_and_or(&mut self) -> Result<Ast, ParserError> {
         // 先解析左侧命令
-        let mut left = self.parse_command()?;
+        let mut left = self.parse_pipeline()?;
 
-        // 如果发现了Token::AndAnd则递归解析
-        while matches!(self.tokens.peek(), Some(Token::AndAnd)) {
-            self.tokens.next(); // 消费 Token::AndAnd
+        loop {
+            if self.tokens.next_if_eq(&Token::AndAnd).is_some() {
+                if self.tokens.peek().is_none(){
+                    return Err(ParserError::MissingCommandAfterAndIf);
+                }
 
-            // 检查Token::AndAnd之后是否存在命令
-            if self.tokens.peek().is_none() {
-                return Err(ParserError::MissingCommandAfterAndIf);
+                let right = self.parse_pipeline()?;
+                left = Ast::AndIf { left: Box::new(left), right: Box::new(right) };
+            } else if self.tokens.next_if_eq(&Token::OrOr).is_some(){
+                if self.tokens.peek().is_none(){
+                    return Err(ParserError::MissingCommandAfterOrIf);
+                }
+                
+                let right = self.parse_pipeline()?;
+                left = Ast::OrIf { left: Box::new(left), right: Box::new(right) };
+            } else {
+                break;
             }
-
-            //解析右侧命令
-            let right = self.parse_command()?;
-            left = Ast::AndIf {
-                left: Box::new(left),
-                right: Box::new(right),
-            };
         }
 
         Ok(left)
     }
 
-    fn parse_pipeline(&mut self) -> Result<T, E> {
-        
+    fn parse_pipeline(&mut self) -> Result<Ast, ParserError> {
+        let first = self.parse_command()?;
+
+        if self.tokens.next_if_eq(&Token::Pipeline).is_none(){
+            return Ok(Ast::Command(first));
+        }
+
+        let mut commands = vec![first];
+        loop {
+            commands.push(self.parse_command()?);
+            if self.tokens.next_if_eq(&Token::Pipeline).is_none(){
+                break;
+            }
+        }
+
+        Ok(Ast::Pipeline { commands })
     }
 }
 
