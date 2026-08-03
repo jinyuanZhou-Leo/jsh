@@ -22,10 +22,8 @@ pub(crate) struct Command {
 pub(crate) enum Ast {
     Command(Command),
     AndIf { left: Box<Ast>, right: Box<Ast> },
-    OrIf {left: Box<Ast>, right: Box<Ast>},
-    Pipeline{
-        commands: Vec<Command>
-    }
+    OrIf { left: Box<Ast>, right: Box<Ast> },
+    Pipeline { commands: Vec<Command> },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -155,19 +153,25 @@ impl Parser {
 
         loop {
             if self.tokens.next_if_eq(&Token::AndAnd).is_some() {
-                if self.tokens.peek().is_none(){
+                if self.tokens.peek().is_none() {
                     return Err(ParserError::MissingCommandAfterAndIf);
                 }
 
                 let right = self.parse_pipeline()?;
-                left = Ast::AndIf { left: Box::new(left), right: Box::new(right) };
-            } else if self.tokens.next_if_eq(&Token::OrOr).is_some(){
-                if self.tokens.peek().is_none(){
+                left = Ast::AndIf {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
+            } else if self.tokens.next_if_eq(&Token::OrOr).is_some() {
+                if self.tokens.peek().is_none() {
                     return Err(ParserError::MissingCommandAfterOrIf);
                 }
-                
+
                 let right = self.parse_pipeline()?;
-                left = Ast::OrIf { left: Box::new(left), right: Box::new(right) };
+                left = Ast::OrIf {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
             } else {
                 break;
             }
@@ -179,14 +183,14 @@ impl Parser {
     fn parse_pipeline(&mut self) -> Result<Ast, ParserError> {
         let first = self.parse_command()?;
 
-        if self.tokens.next_if_eq(&Token::Pipeline).is_none(){
+        if self.tokens.next_if_eq(&Token::Pipeline).is_none() {
             return Ok(Ast::Command(first));
         }
 
         let mut commands = vec![first];
         loop {
             commands.push(self.parse_command()?);
-            if self.tokens.next_if_eq(&Token::Pipeline).is_none(){
+            if self.tokens.next_if_eq(&Token::Pipeline).is_none() {
                 break;
             }
         }
@@ -301,6 +305,73 @@ mod tests {
     }
 
     #[test]
+    fn parses_or_if_left_associatively() {
+        let command = |name| {
+            Ast::Command(Command {
+                args: vec![word(name)],
+                redirections: vec![],
+            })
+        };
+
+        assert_eq!(
+            parse("first || second || third"),
+            Ok(Some(Ast::OrIf {
+                left: Box::new(Ast::OrIf {
+                    left: Box::new(command("first")),
+                    right: Box::new(command("second")),
+                }),
+                right: Box::new(command("third")),
+            }))
+        );
+    }
+
+    #[test]
+    fn parses_pipeline_commands_in_order() {
+        assert_eq!(
+            parse("first | second arg | third"),
+            Ok(Some(Ast::Pipeline {
+                commands: vec![
+                    Command {
+                        args: vec![word("first")],
+                        redirections: vec![],
+                    },
+                    Command {
+                        args: vec![word("second"), word("arg")],
+                        redirections: vec![],
+                    },
+                    Command {
+                        args: vec![word("third")],
+                        redirections: vec![],
+                    },
+                ],
+            }))
+        );
+    }
+
+    #[test]
+    fn pipeline_binds_tighter_than_and_or() {
+        let command = |name| Command {
+            args: vec![word(name)],
+            redirections: vec![],
+        };
+
+        assert_eq!(
+            parse("first | second || third && fourth | fifth"),
+            Ok(Some(Ast::AndIf {
+                left: Box::new(Ast::OrIf {
+                    left: Box::new(Ast::Pipeline {
+                        commands: vec![command("first"), command("second")],
+                    }),
+                    right: Box::new(Ast::Command(command("third"))),
+                }),
+                right: Box::new(Ast::Pipeline {
+                    commands: vec![command("fourth"), command("fifth")],
+                }),
+            }))
+        );
+    }
+
+    #[test]
     fn rejects_incomplete_redirections() {
         assert_eq!(
             Parser::new(vec![Token::IoNumber(2)]).parse(),
@@ -339,5 +410,21 @@ mod tests {
             parse("echo ok &&"),
             Err(ParserError::MissingCommandAfterAndIf)
         );
+    }
+
+    #[test]
+    fn rejects_missing_commands_around_or_if() {
+        assert_eq!(parse("|| echo ok"), Err(ParserError::ExpectCommand));
+        assert_eq!(
+            parse("echo ok ||"),
+            Err(ParserError::MissingCommandAfterOrIf)
+        );
+    }
+
+    #[test]
+    fn rejects_missing_commands_around_pipeline() {
+        assert_eq!(parse("| echo ok"), Err(ParserError::ExpectCommand));
+        assert_eq!(parse("echo ok |"), Err(ParserError::ExpectCommand));
+        assert_eq!(parse("echo ok | | next"), Err(ParserError::ExpectCommand));
     }
 }
