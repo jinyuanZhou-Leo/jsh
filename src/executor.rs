@@ -42,7 +42,7 @@ impl PreparedIo {
         match fd {
             0 => self.stdin = replacement,
             1 => self.stdout = replacement,
-            2 => self.stdin = replacement,
+            2 => self.stderr = replacement,
             _ => return Err(ExecutorError::UnsupportedFileDescriptor { fd }),
         }
 
