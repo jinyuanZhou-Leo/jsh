@@ -11,13 +11,14 @@ pub(crate) use pwd::pwd;
 pub(crate) use type_command::type_command;
 
 use crate::shell::Shell;
+use std::io::{self, Read, Write};
 use thiserror::Error;
-use std::io::{self,Read, Write};
 
-pub type BuiltinFn = for<'io > fn(shell: &mut Shell, args: &[String], io: & mut BuiltinIo<'io>) -> BuiltinOutput;
+pub type BuiltinFn =
+    for<'io> fn(shell: &mut Shell, args: &[String], io: &mut BuiltinIo<'io>) -> BuiltinOutput;
 pub type BuiltinOutput = Result<i32, BuiltinError>;
 
-pub(crate) struct BuiltinIo<'io>{
+pub(crate) struct BuiltinIo<'io> {
     stdin: &'io mut dyn Read,
     stdout: &'io mut dyn Write,
     stderr: &'io mut dyn Write,
@@ -52,20 +53,14 @@ impl<'io> BuiltinIo<'io> {
 #[derive(Debug, Error)]
 pub(crate) enum BuiltinError {
     #[error("{message}")]
-    Failure {
-        status: i32,
-        message: String,
-    },
+    Failure { status: i32, message: String },
 
     #[error("builtin I/O error: {0}")]
     Io(#[from] io::Error),
 }
 
 impl BuiltinError {
-    pub(crate) fn new(
-        status: i32,
-        message: impl Into<String>,
-    ) -> Self {
+    pub(crate) fn new(status: i32, message: impl Into<String>) -> Self {
         Self::Failure {
             status,
             message: message.into(),
@@ -76,6 +71,35 @@ impl BuiltinError {
         match self {
             Self::Failure { status, .. } => *status,
             Self::Io(_) => 1,
+        }
+    }
+}
+
+pub(crate) const BUILTINS: [(&str, BuiltinFn); 5] = [
+    ("exit", exit as BuiltinFn),
+    ("echo", echo as BuiltinFn),
+    ("type", type_command as BuiltinFn),
+    ("pwd", pwd as BuiltinFn),
+    ("cd", cd as BuiltinFn),
+];
+
+pub(crate) const BUILTIN_CHILD_ARG0: &str = "__jsh_builtin_child_mode__";
+
+pub(crate) fn invoke(
+    builtin: BuiltinFn,
+    shell: &mut Shell,
+    argv: &[String],
+    io: &mut BuiltinIo<'_>,
+) -> io::Result<i32> {
+    match builtin(shell, argv, io) {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            let status = error.status();
+
+            // Builtin diagnostics must follow its stderr redirection.
+            writeln!(io.stderr(), "{error}")?;
+
+            Ok(status)
         }
     }
 }

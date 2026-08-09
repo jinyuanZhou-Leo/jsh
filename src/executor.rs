@@ -1,12 +1,16 @@
+use std::env;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
-use std::os::fd::AsFd;
+use std::io::{self, PipeReader, PipeWriter, Write};
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitStatus};
+use std::process::{Child, Command as ProcessCommand, ExitStatus};
+use std::thread::{self, JoinHandle};
 
-use crate::builtin::{BuiltinFn, BuiltinIo};
-use crate::expander::{ExpandedRedirectOperand, ExpandedRedirection, Expander, ExpanderError};
+use crate::builtin::{self, BuiltinError, BuiltinFn, BuiltinIo};
+use crate::expander::{
+    ExpandedCommand, ExpandedRedirectOperand, ExpandedRedirection, Expander, ExpanderError,
+};
 use crate::parser::Command;
 use crate::shell::ResolvedCommand;
 use crate::token::RedirectOperator;
@@ -14,13 +18,13 @@ use crate::{parser::Ast, shell::Shell};
 use thiserror::Error;
 
 #[derive(Debug)]
-struct PreparedIo {
+struct CommandIoCtx {
     stdin: File,
     stdout: File,
     stderr: File,
 }
 
-impl PreparedIo {
+impl CommandIoCtx {
     fn inherit() -> io::Result<Self> {
         Ok(Self {
             stdin: File::from(io::stdin().as_fd().try_clone_to_owned()?),
@@ -52,7 +56,122 @@ impl PreparedIo {
     fn stderr_writer(&self) -> io::Result<File> {
         Ok(self.stderr.try_clone()?)
     }
+
+    /// Applies redirections in source order, so later redirections override earlier ones.
+    fn apply_redirections(
+        mut self,
+        current_dir: &Path,
+        redirections: &[ExpandedRedirection],
+    ) -> Result<CommandIoCtx, ExecutorError> {
+        for redirection in redirections {
+            match (
+                redirection.redirected_fd,
+                redirection.operator,
+                &redirection.operand,
+            ) {
+                (
+                    destination_fd,
+                    RedirectOperator::DuplicateInput | RedirectOperator::DuplicateOutput,
+                    ExpandedRedirectOperand::Fd(source_fd),
+                ) => {
+                    let replacement = self.try_clone_fd(*source_fd)?;
+                    self.replace_fd_with(destination_fd, replacement)?;
+                }
+                (0, RedirectOperator::Input, ExpandedRedirectOperand::Path(path)) => {
+                    let path = Self::resolve_redirection_path(current_dir, path);
+                    self.replace_fd_with(0, Self::open_input(&path)?)?;
+                }
+                (1, RedirectOperator::OutputTruncate, ExpandedRedirectOperand::Path(path)) => {
+                    let path = Self::resolve_redirection_path(current_dir, path);
+                    self.replace_fd_with(1, Self::open_output_truncate(&path)?)?;
+                }
+                (2, RedirectOperator::OutputTruncate, ExpandedRedirectOperand::Path(path)) => {
+                    let path = Self::resolve_redirection_path(current_dir, path);
+                    self.replace_fd_with(2, Self::open_output_truncate(&path)?)?;
+                }
+                (1, RedirectOperator::OutputAppend, ExpandedRedirectOperand::Path(path)) => {
+                    let path = Self::resolve_redirection_path(current_dir, path);
+                    self.replace_fd_with(1, Self::open_output_append(&path)?)?;
+                }
+                (2, RedirectOperator::OutputAppend, ExpandedRedirectOperand::Path(path)) => {
+                    let path = Self::resolve_redirection_path(current_dir, path);
+                    self.replace_fd_with(2, Self::open_output_append(&path)?)?;
+                }
+                (redirected_fd, operator, _) => {
+                    return Err(ExecutorError::UnsupportedRedirection {
+                        redirected_fd,
+                        operator,
+                    });
+                }
+            }
+        }
+
+        Ok(self)
+    }
+
+    fn resolve_redirection_path(current_dir: &Path, redirection_path: &str) -> PathBuf {
+        let path = Path::new(redirection_path);
+
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            current_dir.join(path)
+        }
+    }
+
+    fn open_input(path: &Path) -> Result<File, ExecutorError> {
+        OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|source| ExecutorError::OpenRedirection {
+                path: path.to_path_buf(),
+                source,
+            })
+    }
+
+    fn open_output_truncate(path: &Path) -> Result<File, ExecutorError> {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .map_err(|source| ExecutorError::OpenRedirection {
+                path: path.to_path_buf(),
+                source,
+            })
+    }
+
+    fn open_output_append(path: &Path) -> Result<File, ExecutorError> {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|source| ExecutorError::OpenRedirection {
+                path: path.to_path_buf(),
+                source,
+            })
+    }
 }
+
+enum PipelineJob {
+    Completed(i32),
+    Process(Child),
+}
+
+impl PipelineJob {
+    fn wait(self) -> Result<i32, ExecutorError> {
+        match self {
+            Self::Completed(status) => Ok(status),
+            Self::Process(mut child) => {
+                child
+                    .wait()
+                    .map(Executor::exit_status_code)
+                    .map_err(ExecutorError::WaitPipelineProcess)
+            }
+        }
+    }
+}
+
 
 pub struct Executor;
 
@@ -78,6 +197,9 @@ pub enum ExecutorError {
     BadFileDescripter { fd: u32 },
     #[error("unsupported file descriptor: {fd}")]
     UnsupportedFileDescriptor { fd: u32 },
+
+    #[error("failed to wait for pipeline process")]
+    WaitPipelineProcess(#[source] io::Error),
 }
 
 impl Executor {
@@ -106,7 +228,7 @@ impl Executor {
                     // 否则不执行右侧指令，返回左侧结果
                     Ok(status)
                 }
-            },
+            }
             Ast::OrIf { left, right } => {
                 let status = self.execute_ast(shell, *left)?;
 
@@ -116,10 +238,8 @@ impl Executor {
                 } else {
                     Ok(status)
                 }
-            },
-            Ast::Pipeline { commands } => {
-                todo!()
             }
+            Ast::Pipeline { commands } => self.execute_pipeline(shell, commands),
         }
     }
 
@@ -128,12 +248,11 @@ impl Executor {
         shell: &mut Shell,
         command: Command,
     ) -> Result<i32, ExecutorError> {
-        let expanded_command = Expander::new(shell.environment()).expand_command(command)?;
+        let expanded_command = self.expand_command(command, shell)?;
+        // 重定向需要在命令查找之前完成，因为只要存在重定向，命令为空也是合法的
+        let io_ctx = CommandIoCtx::inherit()?
+            .apply_redirections(shell.current_dir(), &expanded_command.redirections)?;
 
-        // 重定向需要在命令查找之前完成
-        let prepared_io = self.prepare_io(shell.current_dir(), expanded_command.redirections)?;
-
-        // 只要存在重定向，命令为空也是合法的
         let Some((command_name, argv)) = expanded_command.args.split_first() else {
             // 空指令
             return Ok(0);
@@ -141,14 +260,14 @@ impl Executor {
 
         match shell.resolve_command(command_name) {
             Some(ResolvedCommand::Builtin(builtin)) => {
-                self.execute_builtin(builtin, shell, argv, prepared_io)
+                self.execute_builtin(builtin, shell, argv, io_ctx)
             }
             Some(ResolvedCommand::External(path)) => {
-                self.execute_external(&path, command_name, shell, argv, prepared_io)
+                self.execute_external(&path, command_name, shell, argv, io_ctx)
             }
             None => {
                 // Command Not Found
-                writeln!(prepared_io.stderr_writer()?, "{}: not found", command_name)?;
+                writeln!(io_ctx.stderr_writer()?, "{}: not found", command_name)?;
                 Ok(127)
             }
         }
@@ -159,20 +278,11 @@ impl Executor {
         builtin: BuiltinFn,
         shell: &mut Shell,
         argv: &[String],
-        mut prepared_io: PreparedIo,
+        mut io_ctx: CommandIoCtx,
     ) -> Result<i32, ExecutorError> {
-        let mut io = BuiltinIo::new(&mut prepared_io.stdin, &mut prepared_io.stdout, &mut prepared_io.stderr);
+        let mut io = BuiltinIo::new(&mut io_ctx.stdin, &mut io_ctx.stdout, &mut io_ctx.stderr);
 
-        match builtin(shell, argv, &mut io) {
-            Ok(code) => Ok(code),
-            Err(error) => {
-                let status = error.status();
-
-                // 此处同样遵守重定向
-                writeln!(io.stderr(), "{error}")?;
-                Ok(status)
-            }
-        }
+        Ok(builtin::invoke(builtin, shell, argv, &mut io)?)
     }
 
     fn execute_external(
@@ -181,20 +291,13 @@ impl Executor {
         command_name: &String,
         shell: &mut Shell,
         argv: &[String],
-        prepared_io: PreparedIo,
+        io_ctx: CommandIoCtx,
     ) -> Result<i32, ExecutorError> {
         // 创建一个用于记录错误的stderr_writer
-        let mut logger = prepared_io.stderr_writer()?;
+        let mut logger = io_ctx.stderr_writer()?;
 
-        let result = ProcessCommand::new(executable)
-            .arg0(command_name)
-            .args(argv)
-            .env_clear()
-            .envs(shell.environment())
-            .stdin(prepared_io.stdin)
-            .stdout(prepared_io.stdout)
-            .stderr(prepared_io.stderr)
-            .status();
+        let result =
+            Self::build_external_process(executable, command_name, shell, argv, io_ctx).status();
 
         match result {
             Ok(status) => Ok(Self::exit_status_code(status)),
@@ -211,139 +314,151 @@ impl Executor {
         }
     }
 
-    /// 准备重定向，创建文件句柄
-    fn prepare_io(
-        &self,
-        current_dir: &Path,
-        redirections: Vec<ExpandedRedirection>,
-    ) -> Result<PreparedIo, ExecutorError> {
-        let mut prepared_io = PreparedIo::inherit()?;
+    fn build_external_process(
+        executable: &Path,
+        command_name: &String,
+        shell: &Shell,
+        argv: &[String],
+        io_ctx: CommandIoCtx,
+    ) -> ProcessCommand {
+        let mut process = ProcessCommand::new(executable);
+        process
+            .arg0(command_name)
+            .args(argv)
+            .env_clear()
+            .envs(shell.environment())
+            .current_dir(shell.current_dir())
+            .stdin(io_ctx.stdin)
+            .stdout(io_ctx.stdout)
+            .stderr(io_ctx.stderr);
+        process
+    }
 
-        // 按照顺序处理重定向
-        // 靠后的重定向会覆盖前面的重定向
-        for redirection in redirections {
-            match (
-                redirection.redirected_fd,
-                redirection.operator,
-                redirection.operand,
-            ) {
-                (
-                    destination_fd,
-                    RedirectOperator::DuplicateInput | RedirectOperator::DuplicateOutput,
-                    ExpandedRedirectOperand::Fd(source_fd),
-                ) => {
-                    prepared_io
-                        .replace_fd_with(destination_fd, prepared_io.try_clone_fd(source_fd)?)?;
+    fn spawn_builtin_process(command_name: &str, argv: &[String], shell: &Shell, io_ctx: CommandIoCtx) -> io::Result<Child> {
+        let executable = env::current_exe()?;
+
+        ProcessCommand::new(executable)
+            .arg0(builtin::BUILTIN_CHILD_ARG0)
+            .arg(command_name)
+            .args(argv)
+            .env_clear()
+            .envs(shell.environment())
+            .stdin(io_ctx.stdin)
+            .stdout(io_ctx.stdout)
+            .stderr(io_ctx.stderr)
+            .spawn()
+    }
+
+    fn execute_pipeline(
+        &self,
+        shell: &mut Shell,
+        commands: Vec<Command>,
+    ) -> Result<i32, ExecutorError> {
+        let mut jobs = Vec::new();
+        let mut previous_output: Option<PipeReader> = None;
+        let commands_len = commands.len();
+        for (idx, command) in commands.into_iter().enumerate() {
+            let command = self.expand_command(command, shell)?;
+            let mut io_ctx = CommandIoCtx::inherit()?;
+
+            if let Some(previous_output) = previous_output.take() {
+                io_ctx.replace_fd_with(0, File::from(OwnedFd::from(previous_output)))?;
+            };
+
+            let is_last_command = idx + 1 == commands_len;
+            if !is_last_command{
+                // 创建管道
+                let (reader, writer) = io::pipe()?;
+                io_ctx.replace_fd_with(1, File::from(OwnedFd::from(writer)))?;
+                previous_output = Some(reader);
+            }
+            
+            // 处理重定向，重定向优先级高于管道
+            let io_ctx = io_ctx.apply_redirections(shell.current_dir(), &command.redirections)?;
+
+            let Some((command_name, argv)) = command.args.split_first() else {
+                // 空指令
+                jobs.push(PipelineJob::Completed(0));
+                continue;
+            };
+
+            match shell.resolve_command(command_name) {
+                Some(ResolvedCommand::Builtin(_)) => {
+                    let mut logger = io_ctx.stderr_writer()?;
+
+                    match Self::spawn_builtin_process(command_name, argv, shell, io_ctx){
+                        Ok(child) => {
+                            jobs.push(PipelineJob::Process(child))
+                        },
+                        Err(error) => {
+                            writeln!(logger, "{command_name}: failed to execute builtin: {error}")?;
+                            jobs.push(PipelineJob::Completed(126));
+                        }
+                    }
                 }
-                (0, RedirectOperator::Input, ExpandedRedirectOperand::Path(path)) => {
-                    prepared_io.replace_fd_with(
-                        0,
-                        Self::open_input(&self.resolve_redirection_path(current_dir, &path))?,
-                    )?;
-                }
-                (1, RedirectOperator::OutputTruncate, ExpandedRedirectOperand::Path(path)) => {
-                    prepared_io.replace_fd_with(
-                        1,
-                        Self::open_output_truncate(
-                            &self.resolve_redirection_path(current_dir, &path),
-                        )?,
-                    )?;
-                }
-                (2, RedirectOperator::OutputTruncate, ExpandedRedirectOperand::Path(path)) => {
-                    prepared_io.replace_fd_with(
-                        2,
-                        Self::open_output_truncate(
-                            &self.resolve_redirection_path(current_dir, &path),
-                        )?,
-                    )?;
-                }
-                (1, RedirectOperator::OutputAppend, ExpandedRedirectOperand::Path(path)) => {
-                    prepared_io.replace_fd_with(
-                        1,
-                        Self::open_output_append(
-                            &self.resolve_redirection_path(current_dir, &path),
-                        )?,
-                    )?;
-                }
-                (2, RedirectOperator::OutputAppend, ExpandedRedirectOperand::Path(path)) => {
-                    prepared_io.replace_fd_with(
-                        2,
-                        Self::open_output_append(
-                            &self.resolve_redirection_path(current_dir, &path),
-                        )?,
-                    )?;
-                }
-                (redirected_fd, operator, _) => {
-                    return Err(ExecutorError::UnsupportedRedirection {
-                        redirected_fd,
-                        operator,
-                    });
+                Some(ResolvedCommand::External(executable)) => {
+                    let mut logger = io_ctx.stderr_writer()?;
+                    let handler = Self::build_external_process(
+                        &executable,
+                        command_name,
+                        shell,
+                        argv,
+                        io_ctx,
+                    )
+                    .spawn();
+                    match handler {
+                        Ok(child) => {
+                            jobs.push(PipelineJob::Process(child));
+                        },
+                        Err(error) => {
+                            writeln!(logger, "{error}")?;
+                            jobs.push(PipelineJob::Completed(126));
+                        }
+                    }
+                    
+                },
+                None => {
+                    // Command Not Found
+                    writeln!(io_ctx.stderr_writer()?, "{}: not found", command_name)?;
+                    jobs.push(PipelineJob::Completed(127));
                 }
             }
         }
 
-        Ok(prepared_io)
-    }
+        let last_index = jobs.len() - 1;
+        let mut last_status = 0;
+        let mut first_error = None;
 
-    /// 将重定向路径转换成绝对路径
-    ///
-    /// # Arguments
-    ///
-    /// - `current_dir` (`&Path`) - shell当前运行目录
-    /// - `redirection_path` (`&str`) - 重定向路径
-    ///
-    /// # Returns
-    ///
-    /// - `PathBuf` - 重定向目标的绝对路径
-    /// ```
-    fn resolve_redirection_path(&self, current_dir: &Path, redirection_path: &str) -> PathBuf {
-        let path = Path::new(redirection_path);
-
-        if path.is_absolute() {
-            PathBuf::from(path)
-        } else {
-            current_dir.join(path)
+        for (idx, job) in jobs.into_iter().enumerate() {
+            match job.wait() {
+                Ok(status) if idx == last_index => {
+                    last_status = status;
+                }
+                Ok(_) => {}
+                Err(error) if first_error.is_none() => {
+                    first_error = Some(error);
+                }
+                Err(_) => {}
+            }
         }
+
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+
+        Ok(last_status)
     }
 
-    /// 获取一个input模式的File句柄
-    fn open_input(path: &Path) -> Result<File, ExecutorError> {
-        OpenOptions::new()
-            .read(true)
-            .open(path)
-            .map_err(|source| ExecutorError::OpenRedirection {
-                path: path.to_path_buf(),
-                source,
-            })
-    }
-
-    /// 获取一个output truncate模式的File句柄
-    fn open_output_truncate(path: &Path) -> Result<File, ExecutorError> {
-        OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
-            .map_err(|source| ExecutorError::OpenRedirection {
-                path: path.to_path_buf(),
-                source,
-            })
-    }
-
-    /// 获取一个output append模式的File句柄
-    fn open_output_append(path: &Path) -> Result<File, ExecutorError> {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|source| ExecutorError::OpenRedirection {
-                path: path.to_path_buf(),
-                source,
-            })
+    fn expand_command(
+        &self,
+        command: Command,
+        shell: &mut Shell,
+    ) -> Result<ExpandedCommand, ExecutorError> {
+        Ok(Expander::new(shell.environment()).expand_command(command)?)
     }
 
     /// 处理external executable执行返回状态码的工具函数
-    fn exit_status_code(status: ExitStatus) -> i32 {
+    pub(crate) fn exit_status_code(status: ExitStatus) -> i32 {
         // 如果存在状态码则直接返回
         if let Some(code) = status.code() {
             return code;
