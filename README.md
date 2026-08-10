@@ -4,8 +4,6 @@
 
 [中文](README.md) | [English](README.en.md)
 
-> 这是一个用于学习 shell 工作原理的实现，目前只覆盖 POSIX shell 的一部分语法，并不宣称完全兼容 POSIX。
-
 ## 功能
 
 - 交互式 REPL，使用 `$ ` 作为提示符
@@ -15,7 +13,10 @@
 - 波浪号展开，例如 `~/notes`
 - 输入和输出重定向：`<`、`>`、`>>`
 - 支持文件描述符 `0`、`1`、`2` 的常用重定向形式，例如 `2>error.log`
-- `&&` 短路执行
+- `&&` 和 `||` 短路执行，管道的解析优先级高于条件连接符
+- 使用 `|` 连接前台管道，内建命令和外部命令均可作为管道阶段
+- 管道启动全部阶段后统一等待，并返回最后一个阶段的状态码
+- 命令自身的重定向会覆盖所在管道阶段的默认输入或输出
 - 将内建命令和外部命令统一纳入重定向及错误状态码处理
 
 ## 项目结构
@@ -33,7 +34,9 @@ Parser ──> AST
 Expander ──> 展开的命令
   │
   ▼
-Executor ──> 内建命令 / 外部程序
+Executor ──> 条件执行 / 管道 / 单条命令
+                         │
+                         └──> 内建命令 / 外部程序
 ```
 
 核心源码位于 `src/`：
@@ -44,10 +47,12 @@ Executor ──> 内建命令 / 外部程序
 | `lexer.rs` | 将输入文本切分为 token |
 | `parser.rs` | 将 token 解析为命令 AST |
 | `expander.rs` | 处理单词和路径展开 |
-| `executor.rs` | 处理重定向并执行命令 |
+| `executor.rs` | 处理条件执行、管道、重定向和命令分派 |
+| `executor/tests.rs` | Executor 单元测试 |
 | `shell.rs` | 保存当前目录、环境变量和命令解析状态 |
 | `builtin/` | 内建命令实现 |
 | `external.rs` | 根据 `PATH` 查找可执行文件 |
+| `tests/` | 真实程序进程的集成测试 |
 
 ## 环境要求
 
@@ -84,6 +89,9 @@ $ type cd
 $ printf 'hello\n' > output.txt
 $ cat output.txt
 $ false && echo "不会执行"
+$ false || echo "上一条命令失败"
+$ echo "hello from builtin" | cat
+$ printf 'pipeline output\n' | cat > pipeline.txt
 $ exit
 ```
 
@@ -91,7 +99,7 @@ $ exit
 
 ```bash
 cargo check
-cargo test
+cargo test --all-targets
 cargo fmt --check
 ```
 
@@ -99,8 +107,8 @@ cargo fmt --check
 
 以下能力目前尚未实现或尚未完整实现：
 
-- 管道 `|`
 - 后台执行 `&`
+- 完整的作业控制、进程组和 `pipefail`
 - Here-document `<<`
 - 环境变量展开，例如 `$HOME`
 - 通配符展开（globbing）

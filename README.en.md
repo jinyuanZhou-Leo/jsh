@@ -4,8 +4,6 @@ An interactive shell learning project written in Rust, implemented through [Code
 
 [中文](README.md) | [English](README.en.md)
 
-> This project implements a learning-oriented subset of POSIX shell syntax. It does not claim full POSIX compatibility.
-
 ## Features
 
 - Interactive REPL with a `$ ` prompt
@@ -15,7 +13,10 @@ An interactive shell learning project written in Rust, implemented through [Code
 - Tilde expansion, such as `~/notes`
 - Input and output redirection: `<`, `>`, and `>>`
 - Common redirection forms for file descriptors `0`, `1`, and `2`, such as `2>error.log`
-- Short-circuit execution with `&&`
+- Short-circuit execution with `&&` and `||`, with pipelines binding more tightly than conditionals
+- Foreground pipelines connected with `|`, with both built-ins and external commands supported as stages
+- All pipeline stages are started before waiting, and the final stage determines the pipeline status
+- Command-local redirections override the default input or output of their pipeline stage
 - Consistent redirection and exit-status handling for built-ins and external commands
 
 ## Architecture
@@ -33,7 +34,9 @@ Parser ──> AST
 Expander ──> Expanded command
   │
   ▼
-Executor ──> Built-in / external command
+Executor ──> Conditional / pipeline / simple command
+                                  │
+                                  └──> Built-in / external command
 ```
 
 The main implementation is under `src/`:
@@ -44,10 +47,12 @@ The main implementation is under `src/`:
 | `lexer.rs` | Converts source text into tokens |
 | `parser.rs` | Converts tokens into a command AST |
 | `expander.rs` | Expands words and paths |
-| `executor.rs` | Prepares redirections and runs commands |
+| `executor.rs` | Handles conditionals, pipelines, redirections, and command dispatch |
+| `executor/tests.rs` | Executor unit tests |
 | `shell.rs` | Stores the current directory, environment, and command state |
 | `builtin/` | Built-in command implementations |
 | `external.rs` | Finds executables through `PATH` |
+| `tests/` | Integration tests that run the real shell process |
 
 ## Requirements
 
@@ -84,6 +89,9 @@ $ type cd
 $ printf 'hello\n' > output.txt
 $ cat output.txt
 $ false && echo "this will not run"
+$ false || echo "the previous command failed"
+$ echo "hello from builtin" | cat
+$ printf 'pipeline output\n' | cat > pipeline.txt
 $ exit
 ```
 
@@ -91,7 +99,7 @@ $ exit
 
 ```bash
 cargo check
-cargo test
+cargo test --all-targets
 cargo fmt --check
 ```
 
@@ -99,8 +107,8 @@ cargo fmt --check
 
 The following features are not implemented or are not fully implemented yet:
 
-- Pipelines: `|`
 - Background execution: `&`
+- Full job control, process groups, and `pipefail`
 - Here-documents: `<<`
 - Environment-variable expansion, such as `$HOME`
 - Filename expansion (globbing)
