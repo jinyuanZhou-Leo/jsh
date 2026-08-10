@@ -526,6 +526,7 @@ impl Executor {
             .args(argv)
             .env_clear()
             .envs(shell.environment())
+            .current_dir(shell.current_dir())
             .stdin(io_ctx.stdin)
             .stdout(io_ctx.stdout)
             .stderr(io_ctx.stderr)
