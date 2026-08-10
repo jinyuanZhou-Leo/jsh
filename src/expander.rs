@@ -30,11 +30,32 @@ pub(crate) struct Expander<'env> {
 // Notes: 不再提供直接Expand整个Ast的接口，而是在执行器中执行一条展开一条
 
 impl<'env> Expander<'env> {
+    /// 创建借用 Shell 环境变量的展开器。
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - 展开过程可读取的环境变量表。
+    ///
+    /// # Returns
+    ///
+    /// 绑定到给定环境变量生命周期的 [`Expander`]。
     pub(crate) fn new(env: &'env HashMap<String, String>) -> Self {
         Self { env }
     }
 
-    /// 展开Command类型
+    /// 展开命令参数和重定向操作数。
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - Parser 生成的未展开命令。
+    ///
+    /// # Returns
+    ///
+    /// 参数和重定向均已展开的 [`ExpandedCommand`]。
+    ///
+    /// # Errors
+    ///
+    /// 波浪号无法展开，或文件描述符操作数不是有效 `u32` 时返回 [`ExpanderError`]。
     pub(crate) fn expand_command(self, command: Command) -> Result<ExpandedCommand, ExpanderError> {
         let Command { args, redirections } = command;
 
@@ -65,7 +86,7 @@ impl<'env> Expander<'env> {
                 | RedirectOperator::OutputAppend => {
                     // 输入输出重定向，存入文件路径
                     ExpandedRedirectOperand::Path(expanded_operand)
-                },
+                }
             };
 
             expanded_redirections.push(ExpandedRedirection {
@@ -81,7 +102,19 @@ impl<'env> Expander<'env> {
         })
     }
 
-    /// 展开Word中所有的WordPart, 返回String
+    /// 按顺序连接并展开一个 Word 中的所有组成部分。
+    ///
+    /// # Arguments
+    ///
+    /// * `word` - 保留引用和转义边界的未展开 Word。
+    ///
+    /// # Returns
+    ///
+    /// 展开后的字符串。
+    ///
+    /// # Errors
+    ///
+    /// 词首波浪号无法解析到主目录时返回 [`ExpanderError::CouldNotExpandTilde`]。
     pub(crate) fn expand_word(&self, word: Word) -> Result<String, ExpanderError> {
         let mut buffer = String::new();
         for (idx, part) in word.into_parts().enumerate() {
@@ -111,6 +144,20 @@ impl<'env> Expander<'env> {
         Ok(buffer)
     }
 
+    /// 使用当前用户主目录展开字符串中的波浪号。
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - 包含待展开波浪号的输入字符串。
+    ///
+    /// # Returns
+    ///
+    /// 将波浪号替换为主目录路径后的字符串。
+    ///
+    /// # Errors
+    ///
+    /// 无法取得主目录，或主目录路径不是有效 UTF-8 时返回
+    /// [`ExpanderError::CouldNotExpandTilde`]。
     fn expand_tilde(&self, input: &str) -> Result<String, ExpanderError> {
         // 使用env库获取home_dir以提供多平台的支持
         let home_dir = home_dir().ok_or(ExpanderError::CouldNotExpandTilde)?;

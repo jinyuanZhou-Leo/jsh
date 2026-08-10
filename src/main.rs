@@ -12,20 +12,34 @@ use rustyline::error::ReadlineError;
 use thiserror::Error;
 
 use crate::{
-    builtin::{BUILTIN_CHILD_ARG0, BUILTINS, BuiltinIo}, executor::{Executor, ExecutorError}, lexer::{Lexer, LexerError}, parser::{Parser, ParserError}, shell::{ResolvedCommand, Shell},
+    builtin::{BUILTIN_CHILD_ARG0, BUILTINS, BuiltinIo},
+    executor::{Executor, ExecutorError},
+    lexer::{Lexer, LexerError},
+    parser::{Parser, ParserError},
+    shell::{ResolvedCommand, Shell},
 };
 
+/// 根据进程启动模式运行交互式 Shell 或内建命令子进程。
+///
+/// # Errors
+///
+/// 交互模式初始化失败、无法取得当前目录或读取输入失败时返回 [`ReplError`]。
 fn main() -> Result<(), ReplError> {
     let mut args = env::args();
 
     if args.next().as_deref() == Some(BUILTIN_CHILD_ARG0) {
-        // 内建指令子进程模式】
+        // 管道中的内建命令通过当前程序的专用子进程模式执行。
         std::process::exit(run_builtin_child(args));
     } else {
         run_repl()
     }
 }
 
+/// 初始化 Shell 会话并持续读取、解析和执行用户输入。
+///
+/// # Errors
+///
+/// 无法取得当前目录、初始化行编辑器或读取用户输入时返回 [`ReplError`]。
 fn run_repl() -> Result<(), ReplError> {
     // 读取环境变量
     let env = env::vars().collect();
@@ -72,6 +86,21 @@ fn run_repl() -> Result<(), ReplError> {
     Ok(())
 }
 
+/// 对一行源文本依次执行词法分析、语法分析和命令执行。
+///
+/// # Arguments
+///
+/// * `shell` - 保存当前会话状态的 Shell 上下文。
+/// * `executor` - 执行解析结果的命令执行器。
+/// * `source` - 用户输入的原始命令文本。
+///
+/// # Returns
+///
+/// 命令的 Shell 状态码；空输入返回 0。
+///
+/// # Errors
+///
+/// 词法分析、语法分析或执行阶段失败时返回 [`EvalError`]。
 fn execute_line(
     shell: &mut Shell,
     executor: &mut Executor,
@@ -87,6 +116,15 @@ fn execute_line(
     Ok(executor.execute(shell, ast)?)
 }
 
+/// 在独立子进程中执行一个内建命令。
+///
+/// # Arguments
+///
+/// * `args` - 首项为内建命令名，其余项为命令参数的迭代器。
+///
+/// # Returns
+///
+/// 内建命令状态码；启动参数无效或运行环境初始化失败时返回对应的非零状态码。
 fn run_builtin_child(mut args: impl Iterator<Item = String>) -> i32 {
     let Some(command_name) = args.next() else {
         eprintln!("jsh: missing builtin name in child process");
@@ -103,11 +141,7 @@ fn run_builtin_child(mut args: impl Iterator<Item = String>) -> i32 {
         }
     };
 
-    let mut shell = Shell::new(
-        current_dir,
-        env::vars().collect(),
-        builtin::BUILTINS,
-    );
+    let mut shell = Shell::new(current_dir, env::vars().collect(), builtin::BUILTINS);
 
     let builtin = match shell.resolve_command(&command_name) {
         Some(ResolvedCommand::Builtin(builtin)) => builtin,
@@ -121,18 +155,9 @@ fn run_builtin_child(mut args: impl Iterator<Item = String>) -> i32 {
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();
 
-    let mut io = BuiltinIo::new(
-        &mut stdin,
-        &mut stdout,
-        &mut stderr,
-    );
+    let mut io = BuiltinIo::new(&mut stdin, &mut stdout, &mut stderr);
 
-    match builtin::invoke(
-        builtin,
-        &mut shell,
-        &argv,
-        &mut io,
-    ) {
+    match builtin::invoke(builtin, &mut shell, &argv, &mut io) {
         Ok(status) => status,
         Err(error) => {
             eprintln!("jsh: builtin I/O failed: {error}");
@@ -166,6 +191,11 @@ enum EvalError {
 }
 
 impl EvalError {
+    /// 返回不同求值阶段发生错误时使用的 Shell 状态码。
+    ///
+    /// # Returns
+    ///
+    /// Lexer、Parser、Executor 错误分别对应 1、2、3。
     fn status(&self) -> i32 {
         match self {
             Self::Executor(_) => 3,

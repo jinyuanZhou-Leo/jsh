@@ -1,15 +1,33 @@
-use crate::{builtin::{BuiltinError, BuiltinIo, BuiltinOutput}, shell::{ResolvedCommand, Shell}};
+use crate::{
+    builtin::{BuiltinError, BuiltinIo, BuiltinOutput},
+    shell::{ResolvedCommand, Shell},
+};
 
+/// 判断一个命令名对应内建命令、外部命令还是未知命令。
+///
+/// # Arguments
+///
+/// * `shell` - 提供命令解析能力的 Shell 上下文。
+/// * `argv` - 必须恰好包含一个待查询命令名的参数列表。
+/// * `io` - 提供标准输出和标准错误的内建命令 I/O。
+///
+/// # Returns
+///
+/// 查询完成时返回状态码 0。
+///
+/// # Errors
+///
+/// 参数数量不正确或输出写入失败时返回 [`BuiltinError`]。
 pub fn type_command(shell: &mut Shell, argv: &[String], io: &mut BuiltinIo<'_>) -> BuiltinOutput {
     match argv {
         [command_name] => {
             match shell.resolve_command(command_name) {
                 Some(ResolvedCommand::Builtin(_)) => {
                     writeln!(io.stdout(), "{} is a shell builtin", command_name)?;
-                },
+                }
                 Some(ResolvedCommand::External(path)) => {
                     writeln!(io.stdout(), "{} is {}", command_name, path.display())?;
-                },
+                }
                 None => {
                     writeln!(io.stderr(), "{}: not found", command_name)?;
                 }

@@ -47,13 +47,30 @@ pub(crate) struct Parser {
 }
 
 impl Parser {
+    /// 使用有序 Token 序列创建一次性 Parser。
+    ///
+    /// # Arguments
+    ///
+    /// * `tokens` - Lexer 生成的 Token 序列。
+    ///
+    /// # Returns
+    ///
+    /// 尚未消费任何 Token 的 [`Parser`]。
     pub fn new(tokens: Vec<Token>) -> Self {
         Self {
             tokens: tokens.into_iter().peekable(),
         }
     }
 
-    // Parser是一次性对象，所有消费自身所有权
+    /// 消费 Parser 并生成完整的抽象语法树。
+    ///
+    /// # Returns
+    ///
+    /// 空 Token 序列返回 [`None`]，否则返回解析完成的 [`Ast`]。
+    ///
+    /// # Errors
+    ///
+    /// 输入包含意外 Token、不完整重定向或控制操作符缺少命令时返回 [`ParserError`]。
     pub fn parse(mut self) -> Result<Option<Ast>, ParserError> {
         // 如果Token为空则直接返回Ok(None)
         if self.tokens.peek().is_none() {
@@ -70,6 +87,15 @@ impl Parser {
         Ok(Some(ast))
     }
 
+    /// 解析一条命令及其按源码顺序排列的重定向。
+    ///
+    /// # Returns
+    ///
+    /// 解析完成的 [`Command`]。
+    ///
+    /// # Errors
+    ///
+    /// 当前不存在可构成命令的 Token，或重定向不完整时返回 [`ParserError`]。
     fn parse_command(&mut self) -> Result<Command, ParserError> {
         let mut command = Vec::new();
         let mut redirections = Vec::new();
@@ -103,6 +129,15 @@ impl Parser {
         })
     }
 
+    /// 解析可选文件描述符、重定向操作符及其 Word 操作数。
+    ///
+    /// # Returns
+    ///
+    /// 保留尚未展开操作数的 [`Redirection`]。
+    ///
+    /// # Errors
+    ///
+    /// 缺少重定向操作符或操作数时返回 [`ParserError`]。
     fn parse_redirection(&mut self) -> Result<Redirection, ParserError> {
         let redirected_fd = match self.tokens.peek() {
             Some(Token::IoNumber(_)) => {
@@ -147,6 +182,15 @@ impl Parser {
         })
     }
 
+    /// 按左结合规则解析由 `&&` 和 `||` 连接的表达式。
+    ///
+    /// # Returns
+    ///
+    /// 条件操作符组合后的 [`Ast`]。
+    ///
+    /// # Errors
+    ///
+    /// 条件操作符任一侧缺少命令，或子表达式解析失败时返回 [`ParserError`]。
     fn parse_and_or(&mut self) -> Result<Ast, ParserError> {
         // 先解析左侧命令
         let mut left = self.parse_pipeline()?;
@@ -180,6 +224,15 @@ impl Parser {
         Ok(left)
     }
 
+    /// 解析优先级高于条件操作符的管道表达式。
+    ///
+    /// # Returns
+    ///
+    /// 单条命令返回 [`Ast::Command`]，包含管道操作符时返回 [`Ast::Pipeline`]。
+    ///
+    /// # Errors
+    ///
+    /// 管道操作符任一侧缺少命令，或命令解析失败时返回 [`ParserError`]。
     fn parse_pipeline(&mut self) -> Result<Ast, ParserError> {
         let first = self.parse_command()?;
 
