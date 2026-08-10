@@ -121,7 +121,7 @@ impl<'env> Expander<'env> {
             match part {
                 WordPart::Unquoted(content) => {
                     if idx == 0 && (content == "~" || content.starts_with("~/")) {
-                        // 对词首第一个以~开头的WordPart做展开
+                        // 仅对词首第一个 "~" 或以 "~/" 开头的 WordPart 做展开
                         buffer.push_str(&self.expand_tilde(&content)?);
                     } else {
                         buffer.push_str(&content);
