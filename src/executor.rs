@@ -1,13 +1,12 @@
 use std::env;
 use std::fs::{File, OpenOptions};
-use std::io::{self, PipeReader, PipeWriter, Write};
+use std::io::{self, PipeReader, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, ExitStatus};
-use std::thread::{self, JoinHandle};
 
-use crate::builtin::{self, BuiltinError, BuiltinFn, BuiltinIo};
+use crate::builtin::{self, BuiltinFn, BuiltinIo};
 use crate::expander::{
     ExpandedCommand, ExpandedRedirectOperand, ExpandedRedirection, Expander, ExpanderError,
 };
@@ -25,6 +24,11 @@ struct CommandIoCtx {
 }
 
 impl CommandIoCtx {
+    /// 从当前进程复制标准输入、标准输出和标准错误的文件描述符。
+    ///
+    /// # Errors
+    ///
+    /// 任一标准文件描述符复制失败时返回 [`io::Error`]。
     fn inherit() -> io::Result<Self> {
         Ok(Self {
             stdin: File::from(io::stdin().as_fd().try_clone_to_owned()?),
@@ -33,6 +37,17 @@ impl CommandIoCtx {
         })
     }
 
+    /// 复制指定的标准文件描述符。
+    ///
+    /// 目前执行器只支持标准输入、标准输出和标准错误，即文件描述符 0、1、2。
+    ///
+    /// # Arguments
+    ///
+    /// * `fd` - 需要复制的文件描述符。
+    ///
+    /// # Errors
+    ///
+    /// 当 `fd` 不属于 0、1、2，或底层文件描述符复制失败时返回错误。
     fn try_clone_fd(&self, fd: u32) -> Result<File, ExecutorError> {
         match fd {
             0 => Ok(self.stdin.try_clone()?),
@@ -42,6 +57,16 @@ impl CommandIoCtx {
         }
     }
 
+    /// 用给定文件替换指定的标准文件描述符。
+    ///
+    /// # Arguments
+    ///
+    /// * `fd` - 需要替换的目标文件描述符。
+    /// * `replacement` - 接管目标文件描述符的新文件。
+    ///
+    /// # Errors
+    ///
+    /// 当 `fd` 不属于 0、1、2 时返回 [`ExecutorError::UnsupportedFileDescriptor`]。
     fn replace_fd_with(&mut self, fd: u32, replacement: File) -> Result<(), ExecutorError> {
         match fd {
             0 => self.stdin = replacement,
@@ -53,11 +78,25 @@ impl CommandIoCtx {
         Ok(())
     }
 
+    /// 复制标准错误，供执行失败时写入诊断信息。
+    ///
+    /// # Errors
+    ///
+    /// 标准错误文件描述符复制失败时返回 [`io::Error`]。
     fn stderr_writer(&self) -> io::Result<File> {
-        Ok(self.stderr.try_clone()?)
+        self.stderr.try_clone()
     }
 
-    /// Applies redirections in source order, so later redirections override earlier ones.
+    /// 按源码顺序应用重定向，使后出现的重定向覆盖先出现的重定向。
+    ///
+    /// # Arguments
+    ///
+    /// * `current_dir` - 解析相对重定向路径时使用的当前目录。
+    /// * `redirections` - 已展开且保持源码顺序的重定向列表。
+    ///
+    /// # Errors
+    ///
+    /// 当文件打开、文件描述符复制失败，或遇到不支持的重定向时返回错误。
     fn apply_redirections(
         mut self,
         current_dir: &Path,
@@ -109,6 +148,16 @@ impl CommandIoCtx {
         Ok(self)
     }
 
+    /// 将相对重定向路径解析到 Shell 维护的当前目录下。
+    ///
+    /// # Arguments
+    ///
+    /// * `current_dir` - Shell 当前目录。
+    /// * `redirection_path` - 重定向操作数中的原始路径。
+    ///
+    /// # Returns
+    ///
+    /// 绝对路径保持不变；相对路径拼接到 `current_dir` 后返回。
     fn resolve_redirection_path(current_dir: &Path, redirection_path: &str) -> PathBuf {
         let path = Path::new(redirection_path);
 
@@ -119,6 +168,15 @@ impl CommandIoCtx {
         }
     }
 
+    /// 以只读方式打开输入重定向目标。
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - 输入重定向目标路径。
+    ///
+    /// # Errors
+    ///
+    /// 目标无法以只读方式打开时返回 [`ExecutorError::OpenRedirection`]。
     fn open_input(path: &Path) -> Result<File, ExecutorError> {
         OpenOptions::new()
             .read(true)
@@ -129,6 +187,15 @@ impl CommandIoCtx {
             })
     }
 
+    /// 创建或截断输出重定向目标，并以写入方式打开。
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - 输出重定向目标路径。
+    ///
+    /// # Errors
+    ///
+    /// 目标无法创建、截断或打开时返回 [`ExecutorError::OpenRedirection`]。
     fn open_output_truncate(path: &Path) -> Result<File, ExecutorError> {
         OpenOptions::new()
             .write(true)
@@ -141,6 +208,15 @@ impl CommandIoCtx {
             })
     }
 
+    /// 创建输出重定向目标（若不存在），并以追加方式打开。
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - 输出重定向目标路径。
+    ///
+    /// # Errors
+    ///
+    /// 目标无法创建或以追加方式打开时返回 [`ExecutorError::OpenRedirection`]。
     fn open_output_append(path: &Path) -> Result<File, ExecutorError> {
         OpenOptions::new()
             .create(true)
@@ -159,20 +235,23 @@ enum PipelineJob {
 }
 
 impl PipelineJob {
+    /// 等待管道阶段结束，并将进程退出状态转换为 Shell 状态码。
+    ///
+    /// # Errors
+    ///
+    /// 等待子进程失败时返回 [`ExecutorError::WaitPipelineProcess`]。
     fn wait(self) -> Result<i32, ExecutorError> {
         match self {
             Self::Completed(status) => Ok(status),
-            Self::Process(mut child) => {
-                child
-                    .wait()
-                    .map(Executor::exit_status_code)
-                    .map_err(ExecutorError::WaitPipelineProcess)
-            }
+            Self::Process(mut child) => child
+                .wait()
+                .map(Executor::exit_status_code)
+                .map_err(ExecutorError::WaitPipelineProcess),
         }
     }
 }
 
-
+/// 负责展开并执行 Shell 抽象语法树。
 pub struct Executor;
 
 #[derive(Debug, Error)]
@@ -203,14 +282,47 @@ pub enum ExecutorError {
 }
 
 impl Executor {
+    /// 创建一个无状态的执行器。
+    ///
+    /// # Returns
+    ///
+    /// 可用于执行 Shell 抽象语法树的 [`Executor`]。
     pub(crate) fn new() -> Self {
         Self {}
     }
 
+    /// 执行一棵抽象语法树并返回 Shell 状态码。
+    ///
+    /// # Arguments
+    ///
+    /// * `shell` - 保存当前会话状态的 Shell 上下文。
+    /// * `ast` - 待执行的抽象语法树。
+    ///
+    /// # Returns
+    ///
+    /// 命令、条件列表或管道的最终 Shell 状态码。
+    ///
+    /// # Errors
+    ///
+    /// 命令展开、I/O 准备或进程等待失败时返回 [`ExecutorError`]。
     pub(crate) fn execute(&mut self, shell: &mut Shell, ast: Ast) -> Result<i32, ExecutorError> {
         self.execute_ast(shell, ast)
     }
 
+    /// 根据 AST 节点类型执行命令、条件列表或管道。
+    ///
+    /// # Arguments
+    ///
+    /// * `shell` - 保存当前会话状态的 Shell 上下文。
+    /// * `ast` - 当前待执行的 AST 节点。
+    ///
+    /// # Returns
+    ///
+    /// 当前节点执行后的 Shell 状态码。
+    ///
+    /// # Errors
+    ///
+    /// 子节点执行失败时返回 [`ExecutorError`]。
     pub(crate) fn execute_ast(
         &mut self,
         shell: &mut Shell,
@@ -221,18 +333,17 @@ impl Executor {
             Ast::AndIf { left, right } => {
                 let status = self.execute_ast(shell, *left)?;
 
-                // 如果上一条指令成功执行，且shell没有被要求关闭，则继续运行右侧ast
+                // 左侧成功且 Shell 未请求退出时，才执行右侧节点。
                 if status == 0 && !shell.exit_requested() {
                     self.execute_ast(shell, *right)
                 } else {
-                    // 否则不执行右侧指令，返回左侧结果
                     Ok(status)
                 }
             }
             Ast::OrIf { left, right } => {
                 let status = self.execute_ast(shell, *left)?;
 
-                // 如果左侧指令没有成功执行, 且shell没有被要求关闭， 则继续执行右侧ast
+                // 左侧失败且 Shell 未请求退出时，才执行右侧节点。
                 if status != 0 && !shell.exit_requested() {
                     self.execute_ast(shell, *right)
                 } else {
@@ -243,18 +354,31 @@ impl Executor {
         }
     }
 
+    /// 展开并执行单条命令，包括重定向、命令查找和具体分派。
+    ///
+    /// # Arguments
+    ///
+    /// * `shell` - 提供环境变量、当前目录和命令解析能力的 Shell 上下文。
+    /// * `command` - 尚未展开的命令。
+    ///
+    /// # Returns
+    ///
+    /// 命令状态码；未找到命令时返回 127，空命令返回 0。
+    ///
+    /// # Errors
+    ///
+    /// 命令展开、重定向准备或诊断信息写入失败时返回 [`ExecutorError`]。
     pub(crate) fn execute_command(
         &mut self,
         shell: &mut Shell,
         command: Command,
     ) -> Result<i32, ExecutorError> {
         let expanded_command = self.expand_command(command, shell)?;
-        // 重定向需要在命令查找之前完成，因为只要存在重定向，命令为空也是合法的
+        // 重定向必须先于命令查找：仅包含重定向的空命令也是合法命令。
         let io_ctx = CommandIoCtx::inherit()?
             .apply_redirections(shell.current_dir(), &expanded_command.redirections)?;
 
         let Some((command_name, argv)) = expanded_command.args.split_first() else {
-            // 空指令
             return Ok(0);
         };
 
@@ -266,13 +390,25 @@ impl Executor {
                 self.execute_external(&path, command_name, shell, argv, io_ctx)
             }
             None => {
-                // Command Not Found
+                // 未找到命令不是执行器内部错误，按 Shell 约定返回 127。
                 writeln!(io_ctx.stderr_writer()?, "{}: not found", command_name)?;
                 Ok(127)
             }
         }
     }
 
+    /// 在当前 Shell 上下文中同步执行内建命令。
+    ///
+    /// # Arguments
+    ///
+    /// * `builtin` - 待调用的内建命令函数。
+    /// * `shell` - 允许内建命令读取或修改的 Shell 上下文。
+    /// * `argv` - 不包含命令名的参数列表。
+    /// * `io_ctx` - 已应用重定向的命令 I/O。
+    ///
+    /// # Errors
+    ///
+    /// 内建命令的诊断信息无法写入时返回 [`ExecutorError`]。
     fn execute_builtin(
         &self,
         builtin: BuiltinFn,
@@ -285,6 +421,23 @@ impl Executor {
         Ok(builtin::invoke(builtin, shell, argv, &mut io)?)
     }
 
+    /// 同步执行外部命令，并将启动失败转换为状态码 126。
+    ///
+    /// # Arguments
+    ///
+    /// * `executable` - 已解析的可执行文件路径。
+    /// * `command_name` - 用户输入的命令名，用作子进程的 `argv[0]`。
+    /// * `shell` - 提供环境变量和当前目录的 Shell 上下文。
+    /// * `argv` - 不包含命令名的参数列表。
+    /// * `io_ctx` - 已应用重定向的命令 I/O。
+    ///
+    /// # Returns
+    ///
+    /// 外部命令的 Shell 状态码；进程启动失败时返回 126。
+    ///
+    /// # Errors
+    ///
+    /// 标准错误复制或启动失败诊断信息写入失败时返回 [`ExecutorError`]。
     fn execute_external(
         &self,
         executable: &Path,
@@ -293,7 +446,7 @@ impl Executor {
         argv: &[String],
         io_ctx: CommandIoCtx,
     ) -> Result<i32, ExecutorError> {
-        // 创建一个用于记录错误的stderr_writer
+        // io_ctx 会被子进程接管，因此提前复制 stderr 用于报告启动错误。
         let mut logger = io_ctx.stderr_writer()?;
 
         let result =
@@ -308,12 +461,25 @@ impl Executor {
                     executable.display()
                 )?;
 
-                // 命令找到但无法执行，对应状态码126
+                // 命令已找到但无法执行，对应状态码 126。
                 Ok(126)
             }
         }
     }
 
+    /// 构造继承 Shell 环境、当前目录和已准备 I/O 的外部进程。
+    ///
+    /// # Arguments
+    ///
+    /// * `executable` - 需要执行的文件路径。
+    /// * `command_name` - 设置为子进程 `argv[0]` 的命令名。
+    /// * `shell` - 提供子进程环境变量和当前目录的 Shell 上下文。
+    /// * `argv` - 不包含命令名的参数列表。
+    /// * `io_ctx` - 移交给子进程的标准输入、标准输出和标准错误。
+    ///
+    /// # Returns
+    ///
+    /// 已完成参数和环境配置、但尚未启动的 [`ProcessCommand`]。
     fn build_external_process(
         executable: &Path,
         command_name: &String,
@@ -334,7 +500,24 @@ impl Executor {
         process
     }
 
-    fn spawn_builtin_process(command_name: &str, argv: &[String], shell: &Shell, io_ctx: CommandIoCtx) -> io::Result<Child> {
+    /// 以当前程序的内建命令子进程模式启动一个管道阶段。
+    ///
+    /// # Arguments
+    ///
+    /// * `command_name` - 需要执行的内建命令名。
+    /// * `argv` - 不包含命令名的参数列表。
+    /// * `shell` - 提供子进程环境变量的 Shell 上下文。
+    /// * `io_ctx` - 移交给子进程的标准输入、标准输出和标准错误。
+    ///
+    /// # Errors
+    ///
+    /// 无法定位当前可执行文件或无法启动子进程时返回 [`io::Error`]。
+    fn spawn_builtin_process(
+        command_name: &str,
+        argv: &[String],
+        shell: &Shell,
+        io_ctx: CommandIoCtx,
+    ) -> io::Result<Child> {
         let executable = env::current_exe()?;
 
         ProcessCommand::new(executable)
@@ -349,6 +532,24 @@ impl Executor {
             .spawn()
     }
 
+    /// 启动管道的全部阶段，等待它们结束，并返回最后阶段的状态码。
+    ///
+    /// # Arguments
+    ///
+    /// * `shell` - 提供命令展开、解析、环境变量和当前目录的 Shell 上下文。
+    /// * `commands` - 按执行顺序排列的管道命令。
+    ///
+    /// # Returns
+    ///
+    /// 管道最后一个阶段的 Shell 状态码。
+    ///
+    /// # Errors
+    ///
+    /// 管道创建、命令展开、重定向准备、进程启动诊断写入或进程等待失败时返回错误。
+    ///
+    /// # Panics
+    ///
+    /// `commands` 为空时会触发 panic。解析器生成的管道至少包含两个命令。
     fn execute_pipeline(
         &self,
         shell: &mut Shell,
@@ -357,6 +558,8 @@ impl Executor {
         let mut jobs = Vec::new();
         let mut previous_output: Option<PipeReader> = None;
         let commands_len = commands.len();
+
+        // 先逐阶段建立管道并启动进程，避免在生产者运行前等待消费者。
         for (idx, command) in commands.into_iter().enumerate() {
             let command = self.expand_command(command, shell)?;
             let mut io_ctx = CommandIoCtx::inherit()?;
@@ -366,18 +569,16 @@ impl Executor {
             };
 
             let is_last_command = idx + 1 == commands_len;
-            if !is_last_command{
-                // 创建管道
+            if !is_last_command {
                 let (reader, writer) = io::pipe()?;
                 io_ctx.replace_fd_with(1, File::from(OwnedFd::from(writer)))?;
                 previous_output = Some(reader);
             }
-            
-            // 处理重定向，重定向优先级高于管道
+
+            // 命令自身的重定向在管道端点之后应用，因此拥有更高优先级。
             let io_ctx = io_ctx.apply_redirections(shell.current_dir(), &command.redirections)?;
 
             let Some((command_name, argv)) = command.args.split_first() else {
-                // 空指令
                 jobs.push(PipelineJob::Completed(0));
                 continue;
             };
@@ -386,10 +587,8 @@ impl Executor {
                 Some(ResolvedCommand::Builtin(_)) => {
                     let mut logger = io_ctx.stderr_writer()?;
 
-                    match Self::spawn_builtin_process(command_name, argv, shell, io_ctx){
-                        Ok(child) => {
-                            jobs.push(PipelineJob::Process(child))
-                        },
+                    match Self::spawn_builtin_process(command_name, argv, shell, io_ctx) {
+                        Ok(child) => jobs.push(PipelineJob::Process(child)),
                         Err(error) => {
                             writeln!(logger, "{command_name}: failed to execute builtin: {error}")?;
                             jobs.push(PipelineJob::Completed(126));
@@ -409,16 +608,14 @@ impl Executor {
                     match handler {
                         Ok(child) => {
                             jobs.push(PipelineJob::Process(child));
-                        },
+                        }
                         Err(error) => {
                             writeln!(logger, "{error}")?;
                             jobs.push(PipelineJob::Completed(126));
                         }
                     }
-                    
-                },
+                }
                 None => {
-                    // Command Not Found
                     writeln!(io_ctx.stderr_writer()?, "{}: not found", command_name)?;
                     jobs.push(PipelineJob::Completed(127));
                 }
@@ -429,6 +626,7 @@ impl Executor {
         let mut last_status = 0;
         let mut first_error = None;
 
+        // 即使某个 wait 失败，也继续回收其余子进程，最后再返回首个等待错误。
         for (idx, job) in jobs.into_iter().enumerate() {
             match job.wait() {
                 Ok(status) if idx == last_index => {
@@ -449,6 +647,16 @@ impl Executor {
         Ok(last_status)
     }
 
+    /// 使用当前 Shell 环境展开命令参数和重定向操作数。
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - 尚未展开的命令。
+    /// * `shell` - 提供展开所需环境变量的 Shell 上下文。
+    ///
+    /// # Errors
+    ///
+    /// 参数或重定向操作数展开失败时返回 [`ExecutorError::Expansion`]。
     fn expand_command(
         &self,
         command: Command,
@@ -457,9 +665,16 @@ impl Executor {
         Ok(Expander::new(shell.environment()).expand_command(command)?)
     }
 
-    /// 处理external executable执行返回状态码的工具函数
+    /// 将外部进程退出状态转换为 Shell 状态码。
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - 外部进程的原始退出状态。
+    ///
+    /// # Returns
+    ///
+    /// 正常退出时返回进程状态码；Unix 信号终止时返回 `128 + signal`；无法取得上述信息时返回 1。
     pub(crate) fn exit_status_code(status: ExitStatus) -> i32 {
-        // 如果存在状态码则直接返回
         if let Some(code) = status.code() {
             return code;
         }
@@ -467,7 +682,7 @@ impl Executor {
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
-            // 如果进程不是正常退出，而是被Unix信号终止
+            // Unix 进程被信号终止时，Shell 状态码约定为 128 + 信号编号。
             if let Some(signal) = status.signal() {
                 return 128 + signal;
             }
@@ -478,190 +693,4 @@ impl Executor {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        collections::HashMap,
-        fs,
-        path::{Path, PathBuf},
-        sync::atomic::{AtomicU64, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    use super::{Executor, ExecutorError};
-    use crate::{
-        builtin::{self, BuiltinFn, BuiltinIo, BuiltinOutput},
-        lexer::Lexer,
-        parser::Parser,
-        shell::Shell,
-    };
-
-    static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
-
-    struct TestDir(PathBuf);
-
-    impl TestDir {
-        fn new() -> Self {
-            let sequence = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock should be after the Unix epoch")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "codecrafters-shell-executor-{}-{timestamp}-{sequence}",
-                std::process::id()
-            ));
-            fs::create_dir(&path).expect("test directory should be created");
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn failing_builtin(
-        _shell: &mut Shell,
-        _args: &[String],
-        _io: &mut BuiltinIo<'_>,
-    ) -> BuiltinOutput {
-        Ok(7)
-    }
-
-    fn shell<const N: usize>(current_dir: &Path, builtins: [(&str, BuiltinFn); N]) -> Shell {
-        Shell::new(current_dir, HashMap::new(), builtins)
-    }
-
-    fn execute_line(
-        executor: &mut Executor,
-        shell: &mut Shell,
-        source: &str,
-    ) -> Result<i32, ExecutorError> {
-        let tokens = Lexer::new(source).lex().expect("test input should lex");
-        let ast = Parser::new(tokens)
-            .parse()
-            .expect("test input should parse")
-            .expect("test input should produce an AST");
-        executor.execute(shell, ast)
-    }
-
-    #[test]
-    fn executes_a_builtin_with_output_redirection() {
-        let test_dir = TestDir::new();
-        fs::write(test_dir.path().join("output.txt"), "stale content\n")
-            .expect("fixture should be written");
-        let mut shell = shell(test_dir.path(), [("echo", builtin::echo as BuiltinFn)]);
-        let mut executor = Executor::new();
-
-        let status = execute_line(&mut executor, &mut shell, "echo hello world > output.txt")
-            .expect("builtin should execute");
-
-        assert_eq!(status, 0);
-        assert_eq!(
-            fs::read_to_string(test_dir.path().join("output.txt"))
-                .expect("redirected output should exist"),
-            "hello world\n"
-        );
-    }
-
-    #[test]
-    fn output_append_preserves_existing_content() {
-        let test_dir = TestDir::new();
-        let output = test_dir.path().join("output.txt");
-        fs::write(&output, "first\n").expect("fixture should be written");
-        let mut shell = shell(test_dir.path(), [("echo", builtin::echo as BuiltinFn)]);
-        let mut executor = Executor::new();
-
-        execute_line(&mut executor, &mut shell, "echo second >> output.txt")
-            .expect("builtin should execute");
-
-        assert_eq!(
-            fs::read_to_string(output).expect("redirected output should exist"),
-            "first\nsecond\n"
-        );
-    }
-
-    #[test]
-    fn and_if_executes_the_right_side_only_after_success() {
-        let test_dir = TestDir::new();
-        let builtins = [
-            ("fail", failing_builtin as BuiltinFn),
-            ("exit", builtin::exit as BuiltinFn),
-        ];
-        let mut executor = Executor::new();
-        let mut failed_shell = shell(test_dir.path(), builtins);
-
-        let status = execute_line(&mut executor, &mut failed_shell, "fail && exit")
-            .expect("and-if should execute");
-        assert_eq!(status, 7);
-        assert!(!failed_shell.exit_requested());
-
-        let mut successful_shell = shell(test_dir.path(), [("exit", builtin::exit as BuiltinFn)]);
-        let status = execute_line(&mut executor, &mut successful_shell, "> created && exit")
-            .expect("and-if should execute");
-        assert_eq!(status, 0);
-        assert!(successful_shell.exit_requested());
-        assert!(test_dir.path().join("created").is_file());
-    }
-
-    #[test]
-    fn command_not_found_uses_status_127_and_obeys_stderr_redirection() {
-        let test_dir = TestDir::new();
-        let mut shell = shell(test_dir.path(), []);
-        let mut executor = Executor::new();
-
-        let status = execute_line(
-            &mut executor,
-            &mut shell,
-            "definitely-not-a-command 2> error.txt",
-        )
-        .expect("missing command should return a status");
-
-        assert_eq!(status, 127);
-        assert_eq!(
-            fs::read_to_string(test_dir.path().join("error.txt"))
-                .expect("redirected error should exist"),
-            "definitely-not-a-command: not found\n"
-        );
-    }
-
-    #[test]
-    fn rejects_an_unsupported_redirection_without_creating_the_target() {
-        let test_dir = TestDir::new();
-        let mut shell = shell(test_dir.path(), []);
-        let mut executor = Executor::new();
-
-        let error = execute_line(&mut executor, &mut shell, "3> output.txt")
-            .expect_err("fd 3 should not be supported");
-
-        assert!(matches!(
-            error,
-            ExecutorError::UnsupportedRedirection {
-                redirected_fd: 3,
-                operator: crate::token::RedirectOperator::OutputTruncate,
-            }
-        ));
-        assert!(!test_dir.path().join("output.txt").exists());
-    }
-
-    #[test]
-    fn missing_input_file_reports_the_resolved_target_path() {
-        let test_dir = TestDir::new();
-        let expected = test_dir.path().join("missing.txt");
-        let mut shell = shell(test_dir.path(), []);
-        let mut executor = Executor::new();
-
-        let error = execute_line(&mut executor, &mut shell, "< missing.txt")
-            .expect_err("missing input should fail");
-
-        assert!(matches!(
-            error,
-            ExecutorError::OpenRedirection { path, .. } if path == expected
-        ));
-    }
-}
+mod tests;
