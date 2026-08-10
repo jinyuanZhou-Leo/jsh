@@ -120,8 +120,8 @@ impl<'env> Expander<'env> {
         for (idx, part) in word.into_parts().enumerate() {
             match part {
                 WordPart::Unquoted(content) => {
-                    if idx == 0 && content.starts_with('~') {
-                        // 对词首第一个以~开头的WordPart做展开
+                    if idx == 0 && (content == "~" || content.starts_with("~/")) {
+                        // 仅对词首第一个 "~" 或以 "~/" 开头的 WordPart 做展开
                         buffer.push_str(&self.expand_tilde(&content)?);
                     } else {
                         buffer.push_str(&content);
@@ -160,13 +160,18 @@ impl<'env> Expander<'env> {
     /// [`ExpanderError::CouldNotExpandTilde`]。
     fn expand_tilde(&self, input: &str) -> Result<String, ExpanderError> {
         // 使用env库获取home_dir以提供多平台的支持
-        let home_dir = home_dir().ok_or(ExpanderError::CouldNotExpandTilde)?;
-
-        let home_path = home_dir
+        let mut home = home_dir()
+            .ok_or(ExpanderError::CouldNotExpandTilde)?
             .to_str()
-            .ok_or(ExpanderError::CouldNotExpandTilde)?;
+            .ok_or(ExpanderError::CouldNotExpandTilde)?
+            .to_owned();
 
-        Ok(input.replace('~', home_path))
+        home.push_str(
+            input
+                .strip_prefix('~')
+                .ok_or(ExpanderError::CouldNotExpandTilde)?,
+        );
+        Ok(home)
     }
 }
 
@@ -232,11 +237,24 @@ mod tests {
             WordPart::Unquoted("prefix".into()),
             WordPart::Unquoted("~/project".into()),
         ]);
+        let named_user = Word::from_parts(vec![WordPart::Unquoted("~x/project".into())]);
 
         assert_eq!(expander().expand_word(quoted), Ok("~/project".into()));
         assert_eq!(
             expander().expand_word(non_initial),
             Ok("prefix~/project".into())
+        );
+        assert_eq!(expander().expand_word(named_user), Ok("~x/project".into()));
+    }
+
+    #[test]
+    fn expands_only_the_leading_tilde() {
+        let home = home_dir().expect("test environment should have a home directory");
+        let word = Word::from_parts(vec![WordPart::Unquoted("~/a~b".into())]);
+
+        assert_eq!(
+            expander().expand_word(word),
+            Ok(format!("{}/a~b", home.display()))
         );
     }
 
