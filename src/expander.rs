@@ -164,11 +164,9 @@ impl<'env> Expander<'env> {
             .ok_or(ExpanderError::CouldNotExpandTilde)?;
         let home_dir = home_dir
             .to_str()
-            .ok_or(ExpanderError::CouldNotExpandTilde)?
-            .to_owned();
+            .ok_or(ExpanderError::CouldNotExpandTilde)?;
 
         let suffix = input.strip_prefix('~').ok_or(ExpanderError::CouldNotExpandTilde)?;
-        
         
         Ok(format!("{home_dir}{suffix}"))
     }
