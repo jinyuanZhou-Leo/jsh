@@ -74,12 +74,6 @@ Build and start the shell:
 cargo run
 ```
 
-You can also use the local runner supplied by CodeCrafters:
-
-```bash
-./your_program.sh
-```
-
 Once started, try:
 
 ```console

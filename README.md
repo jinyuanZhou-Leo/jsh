@@ -74,12 +74,6 @@ cd codecrafters-shell-rust
 cargo run
 ```
 
-也可以使用 CodeCrafters 提供的本地启动脚本：
-
-```bash
-./your_program.sh
-```
-
 启动后可以尝试：
 
 ```console
