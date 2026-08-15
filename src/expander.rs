@@ -160,13 +160,16 @@ impl<'env> Expander<'env> {
     /// [`ExpanderError::CouldNotExpandTilde`]。
     fn expand_tilde(&self, input: &str) -> Result<String, ExpanderError> {
         // 使用env库获取home_dir以提供多平台的支持
-        let home_dir = home_dir().ok_or(ExpanderError::CouldNotExpandTilde)?;
-
-        let home_path = home_dir
+        let home_dir = home_dir()
+            .ok_or(ExpanderError::CouldNotExpandTilde)?;
+        let home_dir = home_dir
             .to_str()
             .ok_or(ExpanderError::CouldNotExpandTilde)?;
 
-        Ok(input.replace('~', home_path))
+        let suffix = input.strip_prefix('~').ok_or(ExpanderError::CouldNotExpandTilde)?;
+        
+        
+        Ok(format!("{home_dir}{suffix}"))
     }
 }
 
