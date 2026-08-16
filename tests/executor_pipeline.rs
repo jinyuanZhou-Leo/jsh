@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn builtin_output_flows_through_an_external_pipeline_stage() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_codecrafters-shell"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_jsh"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -37,7 +37,7 @@ fn builtin_pipeline_uses_the_shell_current_directory() {
         .expect("temporary directory should exist");
     let command = format!("cd {}\npwd | cat\nexit\n", expected_dir.display());
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_codecrafters-shell"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_jsh"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
