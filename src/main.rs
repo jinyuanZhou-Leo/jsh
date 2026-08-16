@@ -168,8 +168,6 @@ fn run_builtin_child(mut args: impl Iterator<Item = String>) -> i32 {
 
 #[derive(Debug, Error)]
 pub(crate) enum ReplError {
-    #[error("failed to flush prompt: {0}")]
-    FlushPrompt(#[source] std::io::Error),
     #[error("failed to get current directory: {0}")]
     CurrentDirectory(#[source] std::io::Error),
     #[error("failed to read line")]
