@@ -7,14 +7,14 @@ use crate::{
 };
 
 pub(crate) struct ExpandedRedirection {
-    pub(crate) redirected_fd: u32,
+    pub(crate) redirected_fd: i32,
     pub(crate) operator: RedirectOperator,
     pub(crate) operand: ExpandedRedirectOperand,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ExpandedRedirectOperand {
-    Fd(u32),
+    Fd(i32),
     Path(String),
 }
 
@@ -55,7 +55,7 @@ impl<'env> Expander<'env> {
     ///
     /// # Errors
     ///
-    /// 波浪号无法展开，或文件描述符操作数不是有效 `u32` 时返回 [`ExpanderError`]。
+    /// 波浪号无法展开，或文件描述符操作数不是有效 `i32` 时返回 [`ExpanderError`]。
     pub(crate) fn expand_command(self, command: Command) -> Result<ExpandedCommand, ExpanderError> {
         let Command { args, redirections } = command;
 
@@ -76,7 +76,7 @@ impl<'env> Expander<'env> {
             let operand = match operator {
                 RedirectOperator::DuplicateInput | RedirectOperator::DuplicateOutput => {
                     // 解析右侧fd
-                    let fd = expanded_operand.parse::<u32>().map_err(|_| {
+                    let fd = expanded_operand.parse::<i32>().map_err(|_| {
                         ExpanderError::InvalidFileDescriptor(expanded_operand.clone())
                     })?;
                     ExpandedRedirectOperand::Fd(fd)

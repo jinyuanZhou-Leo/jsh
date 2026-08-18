@@ -313,7 +313,7 @@ impl<'src> Lexer<'src> {
     ///
     /// # Errors
     ///
-    /// 当数字超出 `u32` 范围时返回 [`LexerError::InvalidIoNumber`]。
+    /// 当数字超出 `i32` 范围时返回 [`LexerError::InvalidIoNumber`]。
     fn finish_before_redirect(&mut self) -> Result<(), LexerError> {
         if let Some(builder) = self.current_word.take() {
             self.tokens.push(builder.finish_before_redirect()?);
@@ -379,7 +379,7 @@ impl WordBuilder {
     ///
     /// # Errors
     ///
-    /// 当纯数字内容不能表示为 `u32` 时返回 [`LexerError::InvalidIoNumber`]。
+    /// 当纯数字内容不能表示为 `i32` 时返回 [`LexerError::InvalidIoNumber`]。
     fn finish_before_redirect(mut self) -> Result<Token, LexerError> {
         // 如果有且仅有buffer不为空，且为纯数字，则解析为IONumber
         let is_io_number = self.parts.is_empty()
@@ -389,9 +389,9 @@ impl WordBuilder {
         if is_io_number {
             // 未转换类型的 IoNumber，隔离到 text 变量中方便错误处理
             let text = mem::take(&mut self.buffer);
-            // 把text转换成u32, 并处理错误
+            // 把text转换成i32, 并处理错误
             let fd = text
-                .parse::<u32>()
+                .parse::<i32>()
                 .map_err(|_| LexerError::InvalidIoNumber(text))?;
 
             return Ok(Token::IoNumber(fd));
@@ -524,7 +524,7 @@ pub(crate) enum LexerError {
     #[error("unsupported operator \'{0}\'")]
     UnsupportedOperator(&'static str),
     #[error("invalid IoNumber: \'{0}\'")]
-    // 这里使用String而非u32是因为出错时不能保证String是可以被正常解析成u32的
+    // 这里使用String而非i32是因为出错时不能保证String是可以被正常解析成i32的
     InvalidIoNumber(String),
     #[error("unexpected error: {0}")]
     UnexpectedError(String),
@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_an_io_number_that_does_not_fit_u32() {
+    fn reports_an_io_number_that_does_not_fit_i32() {
         assert_eq!(
             Lexer::new("4294967296>output").lex(),
             Err(LexerError::InvalidIoNumber("4294967296".into()))

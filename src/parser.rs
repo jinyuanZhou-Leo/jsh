@@ -6,7 +6,7 @@ use crate::token::{RedirectOperator, Token, Word};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct Redirection {
-    pub(crate) redirected_fd: u32,
+    pub(crate) redirected_fd: i32,
     pub(crate) operator: RedirectOperator,
     /// 操作符右侧尚未展开的操作数。
     pub(crate) operand: Word,

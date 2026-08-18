@@ -2,7 +2,7 @@
 pub(crate) enum Token {
     Word(Word),
     Redirect(RedirectOperator),
-    IoNumber(u32),
+    IoNumber(i32),
     // &&
     AndAnd,
     OrOr,
@@ -28,7 +28,7 @@ impl RedirectOperator {
     /// # Returns
     ///
     /// 输入类操作符返回 0，输出类操作符返回 1。
-    pub(crate) fn default_fd(self) -> u32 {
+    pub(crate) fn default_fd(self) -> i32 {
         // 小enum, 实现了Copy特征，直接传值即可
         match self {
             Self::Input | Self::DuplicateInput => 0,

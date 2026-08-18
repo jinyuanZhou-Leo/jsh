@@ -16,6 +16,21 @@ use crate::token::RedirectOperator;
 use crate::{parser::Ast, shell::Shell};
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fd(i32);
+
+impl Fd {
+    const STDIN: Self = Self(0);
+    const STDOUT: Self = Self(1);
+    const STDERR: Self = Self(2);
+}
+
+impl From<Fd> for i32 {
+    fn from(fd: Fd) -> Self {
+        fd.0
+    }
+}
+
 #[derive(Debug)]
 struct CommandIoCtx {
     stdin: File,
@@ -48,7 +63,8 @@ impl CommandIoCtx {
     /// # Errors
     ///
     /// 当 `fd` 不属于 0、1、2，或底层文件描述符复制失败时返回错误。
-    fn try_clone_fd(&self, fd: u32) -> Result<File, ExecutorError> {
+    fn try_clone_fd(&self, fd: impl Into<i32>) -> Result<File, ExecutorError> {
+        let fd = fd.into();
         match fd {
             0 => Ok(self.stdin.try_clone()?),
             1 => Ok(self.stdout.try_clone()?),
@@ -67,7 +83,12 @@ impl CommandIoCtx {
     /// # Errors
     ///
     /// 当 `fd` 不属于 0、1、2 时返回 [`ExecutorError::UnsupportedFileDescriptor`]。
-    fn replace_fd_with(&mut self, fd: u32, replacement: File) -> Result<(), ExecutorError> {
+    fn replace_fd_with(
+        &mut self,
+        fd: impl Into<i32>,
+        replacement: File,
+    ) -> Result<(), ExecutorError> {
+        let fd = fd.into();
         match fd {
             0 => self.stdin = replacement,
             1 => self.stdout = replacement,
@@ -118,23 +139,23 @@ impl CommandIoCtx {
                 }
                 (0, RedirectOperator::Input, ExpandedRedirectOperand::Path(path)) => {
                     let path = Self::resolve_redirection_path(current_dir, path);
-                    self.replace_fd_with(0, Self::open_input(&path)?)?;
+                    self.replace_fd_with(Fd::STDIN, Self::open_input(&path)?)?;
                 }
                 (1, RedirectOperator::OutputTruncate, ExpandedRedirectOperand::Path(path)) => {
                     let path = Self::resolve_redirection_path(current_dir, path);
-                    self.replace_fd_with(1, Self::open_output_truncate(&path)?)?;
+                    self.replace_fd_with(Fd::STDOUT, Self::open_output_truncate(&path)?)?;
                 }
                 (2, RedirectOperator::OutputTruncate, ExpandedRedirectOperand::Path(path)) => {
                     let path = Self::resolve_redirection_path(current_dir, path);
-                    self.replace_fd_with(2, Self::open_output_truncate(&path)?)?;
+                    self.replace_fd_with(Fd::STDERR, Self::open_output_truncate(&path)?)?;
                 }
                 (1, RedirectOperator::OutputAppend, ExpandedRedirectOperand::Path(path)) => {
                     let path = Self::resolve_redirection_path(current_dir, path);
-                    self.replace_fd_with(1, Self::open_output_append(&path)?)?;
+                    self.replace_fd_with(Fd::STDOUT, Self::open_output_append(&path)?)?;
                 }
                 (2, RedirectOperator::OutputAppend, ExpandedRedirectOperand::Path(path)) => {
                     let path = Self::resolve_redirection_path(current_dir, path);
-                    self.replace_fd_with(2, Self::open_output_append(&path)?)?;
+                    self.replace_fd_with(Fd::STDERR, Self::open_output_append(&path)?)?;
                 }
                 (redirected_fd, operator, _) => {
                     return Err(ExecutorError::UnsupportedRedirection {
@@ -229,12 +250,21 @@ impl CommandIoCtx {
     }
 }
 
-enum PipelineJob {
-    Completed(i32),
-    Process(Child),
+enum Stage<T> {
+    Ready(T),
+    Finished(i32),
 }
 
-impl PipelineJob {
+struct Prepared {
+    command_name: String,
+    argv: Vec<String>,
+    io_ctx: CommandIoCtx,
+}
+
+type PreparedPipeline = Vec<Stage<Prepared>>;
+type RunningPipeline = Vec<Stage<Child>>;
+
+impl Stage<Child> {
     /// 等待管道阶段结束，并将进程退出状态转换为 Shell 状态码。
     ///
     /// # Errors
@@ -242,8 +272,8 @@ impl PipelineJob {
     /// 等待子进程失败时返回 [`ExecutorError::WaitPipelineProcess`]。
     fn wait(self) -> Result<i32, ExecutorError> {
         match self {
-            Self::Completed(status) => Ok(status),
-            Self::Process(mut child) => child
+            Self::Finished(status) => Ok(status),
+            Self::Ready(mut child) => child
                 .wait()
                 .map(Executor::exit_status_code)
                 .map_err(ExecutorError::WaitPipelineProcess),
@@ -269,13 +299,13 @@ pub enum ExecutorError {
 
     #[error("unsupported redirection: fd {redirected_fd} with operator {operator:?}")]
     UnsupportedRedirection {
-        redirected_fd: u32,
+        redirected_fd: i32,
         operator: RedirectOperator,
     },
     #[error("bad file descriptor: {fd}")]
-    BadFileDescripter { fd: u32 },
+    BadFileDescripter { fd: i32 },
     #[error("unsupported file descriptor: {fd}")]
-    UnsupportedFileDescriptor { fd: u32 },
+    UnsupportedFileDescriptor { fd: i32 },
 
     #[error("failed to wait for pipeline process")]
     WaitPipelineProcess(#[source] io::Error),
@@ -533,6 +563,135 @@ impl Executor {
             .spawn()
     }
 
+    fn prepare_pipeline(
+        &self,
+        shell: &mut Shell,
+        commands: Vec<Command>,
+    ) -> Result<PreparedPipeline, ExecutorError> {
+        let mut prepared_pipeline = Vec::new();
+        // 管道上一个job的输出pipe_reader
+        let mut previous_output: Option<PipeReader> = None;
+        let commands_len = commands.len();
+
+        // 先逐阶段建立管道并启动进程，避免在生产者运行前等待消费者。
+        for (idx, command) in commands.into_iter().enumerate() {
+            let command = self.expand_command(command, shell)?;
+            let mut io_ctx = CommandIoCtx::inherit()?;
+
+            if let Some(previous_output) = previous_output.take() {
+                io_ctx.replace_fd_with(Fd::STDIN, File::from(OwnedFd::from(previous_output)))?;
+            };
+
+            let is_last_command = idx + 1 == commands_len;
+            if !is_last_command {
+                let (reader, writer) = io::pipe()?;
+                io_ctx.replace_fd_with(Fd::STDOUT, File::from(OwnedFd::from(writer)))?;
+                previous_output = Some(reader);
+            }
+
+            // 命令自身的重定向在管道端点之后应用，因此拥有更高优先级。
+            let io_ctx = io_ctx.apply_redirections(shell.current_dir(), &command.redirections)?;
+
+            // 不使用split_first, 减少一次堆分配
+            let mut args = command.args;
+            if args.is_empty() {
+                prepared_pipeline.push(Stage::Finished(0));
+                continue;
+            }
+
+            let command_name = args.remove(0);
+            prepared_pipeline.push(Stage::Ready(Prepared {
+                command_name,
+                argv: args,
+                io_ctx,
+            })); // args移除第一个项目之后，变成argv
+        }
+        Ok(prepared_pipeline)
+    }
+
+    fn spawn_pipeline(
+        &self,
+        shell: &mut Shell,
+        prepared_pipeline: PreparedPipeline,
+    ) -> Result<RunningPipeline, ExecutorError> {
+        let mut running_pipeline = Vec::with_capacity(prepared_pipeline.len());
+
+        for job in prepared_pipeline {
+            running_pipeline.push(match job {
+                Stage::Ready(job) => self.spawn_prepared_job(shell, job)?,
+                Stage::Finished(code) => Stage::Finished(code),
+            });
+        }
+
+        Ok(running_pipeline)
+    }
+
+    fn spawn_prepared_job(
+        &self,
+        shell: &Shell,
+        prepared_job: Prepared,
+    ) -> Result<Stage<Child>, ExecutorError> {
+        let Prepared {
+            command_name,
+            argv,
+            io_ctx,
+        } = prepared_job;
+
+        match shell.resolve_command(&command_name) {
+            Some(ResolvedCommand::Builtin(_)) => {
+                let mut logger = io_ctx.stderr_writer()?;
+
+                match Self::spawn_builtin_process(&command_name, &argv, shell, io_ctx) {
+                    Ok(child) => Ok(Stage::Ready(child)),
+                    Err(error) => {
+                        writeln!(logger, "{command_name}: failed to execute builtin: {error}",)?;
+                        Ok(Stage::Finished(126))
+                    }
+                }
+            }
+            Some(ResolvedCommand::External(executable)) => {
+                let mut logger = io_ctx.stderr_writer()?;
+                match Self::build_external_process(&executable, &command_name, shell, &argv, io_ctx)
+                    .spawn()
+                {
+                    Ok(child) => Ok(Stage::Ready(child)),
+                    Err(error) => {
+                        writeln!(logger, "{error}")?;
+                        Ok(Stage::Finished(126))
+                    }
+                }
+            }
+            None => {
+                writeln!(io_ctx.stderr_writer()?, "{command_name}: not found",)?;
+                Ok(Stage::Finished(127))
+            }
+        }
+    }
+
+    fn wait_pipeline(&self, running_pipeline: RunningPipeline) -> Result<i32, ExecutorError> {
+        let mut last_status = 0; // 最后一个阶段的退出代码
+        let mut first_error = None;
+
+        // 即使某个 wait 失败，也继续回收其余子进程，最后再返回首个等待错误。
+        for job in running_pipeline {
+            match job.wait() {
+                Ok(status) => {
+                    last_status = status;
+                }
+                Err(error) if first_error.is_none() => {
+                    // 记录第一个错误，然后继续回收其余的子进程
+                    first_error = Some(error);
+                }
+                Err(_) => {}
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(last_status),
+        }
+    }
+
     /// 启动管道的全部阶段，等待它们结束，并返回最后阶段的状态码。
     ///
     /// # Arguments
@@ -556,96 +715,11 @@ impl Executor {
         shell: &mut Shell,
         commands: Vec<Command>,
     ) -> Result<i32, ExecutorError> {
-        let mut jobs = Vec::new();
-        let mut previous_output: Option<PipeReader> = None;
-        let commands_len = commands.len();
+        let prepared_pipeline = self.prepare_pipeline(shell, commands)?;
+        let running_pipeline = self.spawn_pipeline(shell, prepared_pipeline)?;
+        let status = self.wait_pipeline(running_pipeline)?;
 
-        // 先逐阶段建立管道并启动进程，避免在生产者运行前等待消费者。
-        for (idx, command) in commands.into_iter().enumerate() {
-            let command = self.expand_command(command, shell)?;
-            let mut io_ctx = CommandIoCtx::inherit()?;
-
-            if let Some(previous_output) = previous_output.take() {
-                io_ctx.replace_fd_with(0, File::from(OwnedFd::from(previous_output)))?;
-            };
-
-            let is_last_command = idx + 1 == commands_len;
-            if !is_last_command {
-                let (reader, writer) = io::pipe()?;
-                io_ctx.replace_fd_with(1, File::from(OwnedFd::from(writer)))?;
-                previous_output = Some(reader);
-            }
-
-            // 命令自身的重定向在管道端点之后应用，因此拥有更高优先级。
-            let io_ctx = io_ctx.apply_redirections(shell.current_dir(), &command.redirections)?;
-
-            let Some((command_name, argv)) = command.args.split_first() else {
-                jobs.push(PipelineJob::Completed(0));
-                continue;
-            };
-
-            match shell.resolve_command(command_name) {
-                Some(ResolvedCommand::Builtin(_)) => {
-                    let mut logger = io_ctx.stderr_writer()?;
-
-                    match Self::spawn_builtin_process(command_name, argv, shell, io_ctx) {
-                        Ok(child) => jobs.push(PipelineJob::Process(child)),
-                        Err(error) => {
-                            writeln!(logger, "{command_name}: failed to execute builtin: {error}")?;
-                            jobs.push(PipelineJob::Completed(126));
-                        }
-                    }
-                }
-                Some(ResolvedCommand::External(executable)) => {
-                    let mut logger = io_ctx.stderr_writer()?;
-                    let handler = Self::build_external_process(
-                        &executable,
-                        command_name,
-                        shell,
-                        argv,
-                        io_ctx,
-                    )
-                    .spawn();
-                    match handler {
-                        Ok(child) => {
-                            jobs.push(PipelineJob::Process(child));
-                        }
-                        Err(error) => {
-                            writeln!(logger, "{error}")?;
-                            jobs.push(PipelineJob::Completed(126));
-                        }
-                    }
-                }
-                None => {
-                    writeln!(io_ctx.stderr_writer()?, "{}: not found", command_name)?;
-                    jobs.push(PipelineJob::Completed(127));
-                }
-            }
-        }
-
-        let last_index = jobs.len() - 1;
-        let mut last_status = 0;
-        let mut first_error = None;
-
-        // 即使某个 wait 失败，也继续回收其余子进程，最后再返回首个等待错误。
-        for (idx, job) in jobs.into_iter().enumerate() {
-            match job.wait() {
-                Ok(status) if idx == last_index => {
-                    last_status = status;
-                }
-                Ok(_) => {}
-                Err(error) if first_error.is_none() => {
-                    first_error = Some(error);
-                }
-                Err(_) => {}
-            }
-        }
-
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-
-        Ok(last_status)
+        Ok(status)
     }
 
     /// 使用当前 Shell 环境展开命令参数和重定向操作数。

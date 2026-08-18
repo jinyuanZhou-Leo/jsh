@@ -25,7 +25,7 @@ impl CommandLoader {
             .map(|val| env::split_paths(val).collect())
             .unwrap_or_default();
         Self {
-            path: path,
+            path,
             loaded_command: HashMap::new(),
         }
     }

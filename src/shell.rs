@@ -45,7 +45,7 @@ impl Shell {
             current_dir: current_dir.into(),
             env,
             builtin: builtin.into_iter().map(|(k, v)| (k.into(), v)).collect(),
-            command_loader: command_loader,
+            command_loader,
             exit_request: None,
             last_status: 0,
         }
@@ -139,9 +139,6 @@ impl Shell {
     ///
     /// 已记录退出请求时返回 `true`，否则返回 `false`。
     pub fn exit_requested(&self) -> bool {
-        match self.exit_request {
-            Some(_) => true,
-            None => false,
-        }
+        self.exit_request.is_some()
     }
 }
