@@ -573,7 +573,7 @@ impl Executor {
         let mut previous_output: Option<PipeReader> = None;
         let commands_len = commands.len();
 
-        // 先逐阶段建立管道并启动进程，避免在生产者运行前等待消费者。
+        // 建立管道并处理重定向
         for (idx, command) in commands.into_iter().enumerate() {
             let command = self.expand_command(command, shell)?;
             let mut io_ctx = CommandIoCtx::inherit()?;
@@ -618,7 +618,15 @@ impl Executor {
 
         for job in prepared_pipeline {
             running_pipeline.push(match job {
-                Stage::Ready(job) => self.spawn_prepared_job(shell, job)?,
+                Stage::Ready(job) => match self.spawn_prepared_job(shell, job){
+                    // https://github.com/jinyuanZhou-Leo/jsh/issues/1
+                    // prepared_job生成失败的时候，要把已经生成的所有任务wait掉
+                    Ok(job) => job,
+                    Err(error) => {
+                        let _ = self.wait_pipeline(running_pipeline);
+                        return Err(error);
+                    }
+                },
                 Stage::Finished(code) => Stage::Finished(code),
             });
         }

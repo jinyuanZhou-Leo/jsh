@@ -3,7 +3,8 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use super::{Executor, ExecutorError};
@@ -216,6 +217,45 @@ fn pipeline_returns_the_last_stage_status() {
     let status =
         execute_line(&mut executor, &mut shell, "true | false").expect("pipeline should execute");
     assert_ne!(status, 0);
+}
+
+#[test]
+// https://github.com/jinyuanZhou-Leo/jsh/issues/1
+fn later_stage_redirection_failure_does_not_leave_a_running_child() {
+    let test_dir = TestDir::new();
+    let started = test_dir.path().join("started.txt");
+    let finished = test_dir.path().join("finished.txt");
+    let missing = test_dir.path().join("missing.txt");
+    let mut shell = shell_with_system_path(test_dir.path());
+    let mut executor = Executor::new();
+
+    let error = execute_line(
+        &mut executor,
+        &mut shell,
+        "sh -c 'printf started > started.txt; sleep 1; printf finished > finished.txt' | cat < missing.txt",
+    )
+    .expect_err("later-stage input redirection should fail during setup");
+
+    assert!(matches!(
+        error,
+        ExecutorError::OpenRedirection { path, .. } if path == missing
+    ));
+    assert!(
+        !started.exists(),
+        "first pipeline stage should not start when a later stage fails to prepare"
+    );
+    assert!(!finished.exists());
+
+    thread::sleep(Duration::from_secs(2));
+
+    assert!(
+        !started.exists(),
+        "an unreaped first-stage child would have created started.txt"
+    );
+    assert!(
+        !finished.exists(),
+        "an unreaped first-stage child would have created finished.txt after sleeping"
+    );
 }
 
 #[test]
