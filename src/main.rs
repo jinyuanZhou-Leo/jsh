@@ -6,9 +6,12 @@ mod lexer;
 mod parser;
 mod shell;
 mod token;
-use std::env;
+use std::{env, path::PathBuf};
 
-use rustyline::error::ReadlineError;
+use rustyline::{
+    Config, HistoryDuplicates,
+    error::{self, ReadlineError},
+};
 use thiserror::Error;
 
 use crate::{
@@ -52,12 +55,39 @@ fn run_repl() -> Result<(), ReplError> {
 
     let mut executor = Executor::new();
 
-    let mut editor = rustyline::DefaultEditor::new().map_err(|_| ReplError::InitializeEditor)?;
+    let config = Config::builder()
+        .max_history_size(1000)
+        .map_err(|error| ReplError::ConfigureEditor(error))?
+        .history_ignore_space(true)
+        .history_ignore_dups(true)
+        .map_err(|error| ReplError::ConfigureEditor(error))?
+        .auto_add_history(true)
+        .build();
+    let mut rl =
+        rustyline::DefaultEditor::with_config(config).map_err(|_| ReplError::InitializeEditor)?;
+
+    let history_file_path = history_file_path(&shell);
+    if let Some(path) = &history_file_path {
+        match rl.load_history(path) {
+            Ok(()) => {}
+            Err(ReadlineError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                eprintln!("jsh: failed to load history: {error}");
+            }
+        }
+    }
 
     while !shell.exit_requested() {
         // 读取用户输入
-        let source = match editor.readline("$ ") {
-            Ok(source) => source,
+        let source = match rl.readline("$ ") {
+            Ok(source) => {
+                if let Some(path) = &history_file_path {
+                    if let Err(error) = rl.append_history(path) {
+                        eprintln!("jsh: failed to append history: {error}");
+                    }
+                }
+                source
+            }
             Err(ReadlineError::Eof) => {
                 // Ctrl/Cmd + D 退出终端
                 shell.request_exit(0);
@@ -116,6 +146,23 @@ fn execute_line(
     Ok(executor.execute(shell, ast)?)
 }
 
+fn history_file_path(shell: &Shell) -> Option<PathBuf> {
+    match shell.env("HISTFILE") {
+        Some("") => None,
+        Some(value) => {
+            let mut path = PathBuf::from(value);
+            if !path.is_absolute() {
+                path = shell.current_dir().join(path);
+            }
+            Some(path)
+        }
+        None => match env::home_dir() {
+            Some(value) => Some(value.join(".jsh_history")),
+            None => None,
+        },
+    }
+}
+
 /// 在独立子进程中执行一个内建命令。
 ///
 /// # Arguments
@@ -170,10 +217,18 @@ fn run_builtin_child(mut args: impl Iterator<Item = String>) -> i32 {
 pub(crate) enum ReplError {
     #[error("failed to get current directory: {0}")]
     CurrentDirectory(#[source] std::io::Error),
+
     #[error("failed to read line")]
-    ReadLine(#[source] ReadlineError),
+    ReadLine(#[from] ReadlineError),
+
     #[error("failed to initialize editor")]
     InitializeEditor,
+
+    #[error("failed to configure editor: {0}")]
+    ConfigureEditor(#[source] ReadlineError),
+
+    #[error("failed to save history: {0}")]
+    SaveHistory(#[source] ReadlineError),
 }
 
 #[derive(Debug, Error)]
