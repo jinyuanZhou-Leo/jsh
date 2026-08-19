@@ -116,7 +116,7 @@ impl Shell {
         }
 
         // 外部可执行程序
-        if let Some(external_command) = self.command_loader.find_executable(name) {
+        if let Some(external_command) = self.command_loader.find_executable(name, self.current_dir()) {
             return Some(ResolvedCommand::External(external_command));
         }
 

@@ -9,8 +9,8 @@ mod token;
 use std::{env, path::PathBuf};
 
 use rustyline::{
-    Config, HistoryDuplicates,
-    error::{self, ReadlineError},
+    Config,
+    error::ReadlineError,
 };
 use thiserror::Error;
 
