@@ -64,9 +64,9 @@ impl Shell {
     ///
     /// # Arguments
     ///
-    /// * `path` - 新的当前目录路径。
-    pub(crate) fn set_current_dir(&mut self, path: impl Into<PathBuf>) {
-        self.current_dir = path.into();
+    /// * `dir` - 新的当前目录。
+    pub(crate) fn set_current_dir(&mut self, dir: impl Into<PathBuf>) {
+        self.current_dir = dir.into();
     }
 
     /// 更新最近一次求值的状态码。

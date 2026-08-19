@@ -146,11 +146,8 @@ fn execute_line(
 fn history_file_path(shell: &Shell) -> Option<PathBuf> {
     match shell.env("HISTFILE") {
         Some("") => None,
-        Some(value) => {
-            let path = shell.current_dir().join(value);
-            Some(path)
-        }
-        None => env::home_dir().map(|value| value.join(".jsh_history")),
+        Some(path) => Some(shell.current_dir().join(path)),
+        None => env::home_dir().map(|home_dir| home_dir.join(".jsh_history")),
     }
 }
 

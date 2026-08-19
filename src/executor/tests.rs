@@ -27,12 +27,12 @@ impl TestDir {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after the Unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
+        let dir = std::env::temp_dir().join(format!(
             "codecrafters-shell-executor-{}-{timestamp}-{sequence}",
             std::process::id()
         ));
-        fs::create_dir(&path).expect("test directory should be created");
-        Self(path)
+        fs::create_dir(&dir).expect("test directory should be created");
+        Self(dir)
     }
 
     fn path(&self) -> &Path {
@@ -55,10 +55,10 @@ fn shell<const N: usize>(current_dir: &Path, builtins: [(&str, BuiltinFn); N]) -
 }
 
 fn shell_with_system_path(current_dir: &Path) -> Shell {
-    let path = std::env::var("PATH").expect("test process should define PATH");
+    let path_env = std::env::var("PATH").expect("test process should define PATH");
     Shell::new(
         current_dir,
-        HashMap::from([("PATH".to_owned(), path)]),
+        HashMap::from([("PATH".to_owned(), path_env)]),
         [] as [(&str, BuiltinFn); 0],
     )
 }
@@ -338,7 +338,7 @@ fn relative_executable_is_resolved_against_the_shell_cwd_after_cd() {
     );
     assert!(
         !start_dir.path().join("output.txt").exists(),
-        "redirection should use the shell cwd after cd, not the original directory"
+        "redirection should use the shell current directory after cd, not the original directory"
     );
 }
 
@@ -370,7 +370,7 @@ fn absolute_executable_path_runs_from_another_shell_cwd() {
 
 #[test]
 // https://github.com/jinyuanZhou-Leo/jsh/issues/4
-fn relative_path_entry_is_resolved_against_the_shell_cwd() {
+fn relative_path_dir_is_resolved_against_the_shell_current_dir() {
     let logical_dir = TestDir::new();
     let bin_dir = logical_dir.path().join("bin");
     fs::create_dir(&bin_dir).expect("relative PATH directory should be created");
@@ -384,7 +384,7 @@ fn relative_path_entry_is_resolved_against_the_shell_cwd() {
     let mut executor = Executor::new();
 
     let status = execute_line(&mut executor, &mut shell, "jsh-path-tool > output.txt")
-        .expect("command in a relative PATH entry should run");
+        .expect("command in a relative PATH directory should run");
 
     assert_eq!(status, 0);
     assert_eq!(
