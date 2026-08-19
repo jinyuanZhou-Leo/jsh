@@ -150,10 +150,7 @@ fn history_file_path(shell: &Shell) -> Option<PathBuf> {
     match shell.env("HISTFILE") {
         Some("") => None,
         Some(value) => {
-            let mut path = PathBuf::from(value);
-            if !path.is_absolute() {
-                path = shell.current_dir().join(path);
-            }
+            let path = shell.current_dir().join(value);
             Some(path)
         }
         None => match env::home_dir() {

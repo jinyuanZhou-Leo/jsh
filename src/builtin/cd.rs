@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::{
     builtin::{BuiltinError, BuiltinIo, BuiltinOutput},
     shell::Shell,
@@ -23,12 +21,7 @@ use crate::{
 pub fn cd(shell: &mut Shell, argv: &[String], _io: &mut BuiltinIo<'_>) -> BuiltinOutput {
     match argv {
         [dir] => {
-            let dir = PathBuf::from(dir);
-            let dir = if dir.is_absolute() {
-                dir
-            } else {
-                shell.current_dir().join(dir)
-            };
+            let dir = shell.current_dir().join(dir);
 
             // canonical同时也检查了路径是否存在
             let dir = match dir.canonicalize() {

@@ -179,14 +179,9 @@ impl CommandIoCtx {
     /// # Returns
     ///
     /// 绝对路径保持不变；相对路径拼接到 `current_dir` 后返回。
+    #[inline]
     fn resolve_redirection_path(current_dir: &Path, redirection_path: &str) -> PathBuf {
-        let path = Path::new(redirection_path);
-
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            current_dir.join(path)
-        }
+        current_dir.join(redirection_path)
     }
 
     /// 以只读方式打开输入重定向目标。
