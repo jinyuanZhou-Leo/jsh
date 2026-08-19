@@ -7,8 +7,9 @@ An interactive shell learning project written in Rust, implemented through [Code
 ## Features
 
 - Interactive REPL with a `$ ` prompt
+- Persistent command history in `~/.jsh_history` (up to 1000 entries; leading-space and duplicate lines are ignored); set `HISTFILE` to choose another path, or an empty value to disable persistence
 - Built-in commands: `cd`, `echo`, `exit`, `pwd`, and `type`
-- External command lookup through `PATH`
+- External command lookup through `PATH`; names containing `/` (such as `./script` or `/bin/ls`) are resolved directly, and relative paths plus relative `PATH` entries use the shell's logical current directory rather than the process cwd
 - Single quotes, double quotes, and backslash escapes
 - Tilde expansion, such as `~/notes`
 - Input and output redirection: `<`, `>`, and `>>`
@@ -51,7 +52,7 @@ The main implementation is under `src/`:
 | `executor/tests.rs` | Executor unit tests |
 | `shell.rs` | Stores the current directory, environment, and command state |
 | `builtin/` | Built-in command implementations |
-| `external.rs` | Finds executables through `PATH` |
+| `external.rs` | Resolves path-qualified commands against the logical cwd and finds executables through `PATH` |
 | `tests/` | Integration tests that run the real shell process |
 
 ## Requirements
@@ -64,8 +65,8 @@ The main implementation is under `src/`:
 Clone the repository and enter its directory:
 
 ```bash
-git clone <your-repository-url>
-cd codecrafters-shell-rust
+git clone https://github.com/jinyuanZhou-Leo/jsh.git
+cd jsh
 ```
 
 Build and start the shell:
@@ -80,6 +81,8 @@ Once started, try:
 $ pwd
 $ echo "hello, shell"
 $ type cd
+$ cd /tmp
+$ ./script
 $ printf 'hello\n' > output.txt
 $ cat output.txt
 $ false && echo "this will not run"

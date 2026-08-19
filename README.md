@@ -7,8 +7,9 @@
 ## 功能
 
 - 交互式 REPL，使用 `$ ` 作为提示符
+- 将命令历史持久化到 `~/.jsh_history`（最多 1000 条，忽略前导空格和重复项）；可用 `HISTFILE` 指定路径，空值则关闭持久化
 - 内建命令：`cd`、`echo`、`exit`、`pwd`、`type`
-- 根据 `PATH` 查找并执行外部程序
+- 根据 `PATH` 查找并执行外部程序；含 `/` 的命令名（如 `./script`、`/bin/ls`）直接解析，相对路径和相对 `PATH` 项相对 Shell 逻辑当前目录，而不是进程 cwd
 - 单引号、双引号和反斜杠转义
 - 波浪号展开，例如 `~/notes`
 - 输入和输出重定向：`<`、`>`、`>>`
@@ -51,7 +52,7 @@ Executor ──> 条件执行 / 管道 / 单条命令
 | `executor/tests.rs` | Executor 单元测试 |
 | `shell.rs` | 保存当前目录、环境变量和命令解析状态 |
 | `builtin/` | 内建命令实现 |
-| `external.rs` | 根据 `PATH` 查找可执行文件 |
+| `external.rs` | 按逻辑当前目录解析带路径的命令，并在 `PATH` 中查找可执行文件 |
 | `tests/` | 真实程序进程的集成测试 |
 
 ## 环境要求
@@ -64,8 +65,8 @@ Executor ──> 条件执行 / 管道 / 单条命令
 克隆仓库并进入项目目录：
 
 ```bash
-git clone <your-repository-url>
-cd codecrafters-shell-rust
+git clone https://github.com/jinyuanZhou-Leo/jsh.git
+cd jsh
 ```
 
 构建并启动：
@@ -80,6 +81,8 @@ cargo run
 $ pwd
 $ echo "hello, shell"
 $ type cd
+$ cd /tmp
+$ ./script
 $ printf 'hello\n' > output.txt
 $ cat output.txt
 $ false && echo "不会执行"
