@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     thread,
@@ -60,6 +61,16 @@ fn shell_with_system_path(current_dir: &Path) -> Shell {
         HashMap::from([("PATH".to_owned(), path)]),
         [] as [(&str, BuiltinFn); 0],
     )
+}
+
+fn write_executable_script(path: &Path, marker: &str) {
+    fs::write(path, format!("#!/bin/sh\nprintf '{marker}'\n"))
+        .expect("executable fixture should be written");
+    let mut permissions = fs::metadata(path)
+        .expect("executable fixture should exist")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("fixture should be executable");
 }
 
 fn execute_line(
@@ -296,6 +307,91 @@ fn rejects_an_unsupported_redirection_without_creating_the_target() {
         }
     ));
     assert!(!test_dir.path().join("output.txt").exists());
+}
+
+#[test]
+// https://github.com/jinyuanZhou-Leo/jsh/issues/4
+fn relative_executable_is_resolved_against_the_shell_cwd_after_cd() {
+    let start_dir = TestDir::new();
+    let script_dir = TestDir::new();
+    let script = script_dir.path().join("jsh-relative-script");
+    write_executable_script(&script, "from-logical-cwd");
+
+    let mut shell = shell(start_dir.path(), [("cd", builtin::cd as BuiltinFn)]);
+    let mut executor = Executor::new();
+
+    let status = execute_line(
+        &mut executor,
+        &mut shell,
+        &format!(
+            "cd {} && ./jsh-relative-script > output.txt",
+            script_dir.path().display()
+        ),
+    )
+    .expect("relative executable should run after cd");
+
+    assert_eq!(status, 0);
+    assert_eq!(
+        fs::read_to_string(script_dir.path().join("output.txt"))
+            .expect("script output should be redirected"),
+        "from-logical-cwd"
+    );
+    assert!(
+        !start_dir.path().join("output.txt").exists(),
+        "redirection should use the shell cwd after cd, not the original directory"
+    );
+}
+
+#[test]
+// https://github.com/jinyuanZhou-Leo/jsh/issues/4
+fn absolute_executable_path_runs_from_another_shell_cwd() {
+    let start_dir = TestDir::new();
+    let script_dir = TestDir::new();
+    let script = script_dir.path().join("jsh-absolute-script");
+    write_executable_script(&script, "from-absolute-path");
+
+    let mut shell = shell(start_dir.path(), []);
+    let mut executor = Executor::new();
+
+    let status = execute_line(
+        &mut executor,
+        &mut shell,
+        &format!("{} > output.txt", script.display()),
+    )
+    .expect("absolute executable should run");
+
+    assert_eq!(status, 0);
+    assert_eq!(
+        fs::read_to_string(start_dir.path().join("output.txt"))
+            .expect("script output should be redirected"),
+        "from-absolute-path"
+    );
+}
+
+#[test]
+// https://github.com/jinyuanZhou-Leo/jsh/issues/4
+fn relative_path_entry_is_resolved_against_the_shell_cwd() {
+    let logical_dir = TestDir::new();
+    let bin_dir = logical_dir.path().join("bin");
+    fs::create_dir(&bin_dir).expect("relative PATH directory should be created");
+    write_executable_script(&bin_dir.join("jsh-path-tool"), "from-relative-path");
+
+    let mut shell = Shell::new(
+        logical_dir.path(),
+        HashMap::from([("PATH".to_owned(), "bin".to_owned())]),
+        [] as [(&str, BuiltinFn); 0],
+    );
+    let mut executor = Executor::new();
+
+    let status = execute_line(&mut executor, &mut shell, "jsh-path-tool > output.txt")
+        .expect("command in a relative PATH entry should run");
+
+    assert_eq!(status, 0);
+    assert_eq!(
+        fs::read_to_string(logical_dir.path().join("output.txt"))
+            .expect("script output should be redirected"),
+        "from-relative-path"
+    );
 }
 
 #[test]
