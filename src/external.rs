@@ -47,7 +47,7 @@ impl CommandLoader {
             // https://github.com/jinyuanZhou-Leo/jsh/issues/4
             // 正确处理包含相对/绝对路径的命令
             let candidate = cwd.join(cmd);
-            return (candidate.is_file() && candidate.is_executable()).then(|| candidate);
+            return (candidate.is_file() && candidate.is_executable()).then_some(candidate);
         }
 
         self.paths
@@ -58,7 +58,7 @@ impl CommandLoader {
             // 2. 尾部拼入command_name
             .map(|candidate| cwd.join(candidate).join(cmd))
             .find_map(|candidate| {
-                (candidate.is_file() && candidate.is_executable()).then(|| candidate)
+                (candidate.is_file() && candidate.is_executable()).then_some(candidate)
             })
     }
 }

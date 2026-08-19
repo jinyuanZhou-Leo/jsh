@@ -8,10 +8,7 @@ mod shell;
 mod token;
 use std::{env, path::PathBuf};
 
-use rustyline::{
-    Config,
-    error::ReadlineError,
-};
+use rustyline::{Config, error::ReadlineError};
 use thiserror::Error;
 
 use crate::{
@@ -57,10 +54,10 @@ fn run_repl() -> Result<(), ReplError> {
 
     let config = Config::builder()
         .max_history_size(1000)
-        .map_err(|error| ReplError::ConfigureEditor(error))?
+        .map_err(ReplError::ConfigureEditor)?
         .history_ignore_space(true)
         .history_ignore_dups(true)
-        .map_err(|error| ReplError::ConfigureEditor(error))?
+        .map_err(ReplError::ConfigureEditor)?
         .auto_add_history(true)
         .build();
     let mut rl =
@@ -81,10 +78,10 @@ fn run_repl() -> Result<(), ReplError> {
         // 读取用户输入
         let source = match rl.readline("$ ") {
             Ok(source) => {
-                if let Some(path) = &history_file_path {
-                    if let Err(error) = rl.append_history(path) {
-                        eprintln!("jsh: failed to append history: {error}");
-                    }
+                if let Some(path) = &history_file_path
+                    && let Err(error) = rl.append_history(path)
+                {
+                    eprintln!("jsh: failed to append history: {error}");
                 }
                 source
             }
@@ -153,10 +150,7 @@ fn history_file_path(shell: &Shell) -> Option<PathBuf> {
             let path = shell.current_dir().join(value);
             Some(path)
         }
-        None => match env::home_dir() {
-            Some(value) => Some(value.join(".jsh_history")),
-            None => None,
-        },
+        None => env::home_dir().map(|value| value.join(".jsh_history")),
     }
 }
 
