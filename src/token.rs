@@ -7,6 +7,7 @@ pub(crate) enum Token {
     AndAnd,
     OrOr,
     Pipeline,
+    Semicolon,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -165,7 +165,10 @@ impl<'src> Lexer<'src> {
                 } else {
                     return Err(LexerError::IncompleteEscape);
                 }
-            }
+            },
+            ';' => {
+                self.emit_control_operator(Token::Semicolon);
+            },
             ' ' | '\t' => {
                 self.finish_word();
             }
@@ -286,7 +289,7 @@ impl<'src> Lexer<'src> {
 
     /// 结束当前 Word，并提交一个控制操作符 Token。
     ///
-    /// 该方法用于 `&&`、`||` 和管道；重定向必须使用
+    /// 注意: 该方法会结束当前正在构建的Word, 不应当在该方法前调用 [`Lexer::finish_word`] 方法！
     /// [`Lexer::finish_before_redirect`] 保留 IO number 识别语义。
     ///
     /// # Arguments

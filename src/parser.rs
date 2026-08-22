@@ -23,6 +23,7 @@ pub(crate) enum Ast {
     Command(Command),
     AndIf { left: Box<Ast>, right: Box<Ast> },
     OrIf { left: Box<Ast>, right: Box<Ast> },
+    Seq(Vec<Ast>),
     Pipeline { commands: Vec<Command> },
 }
 
@@ -40,6 +41,8 @@ pub(crate) enum ParserError {
     ExpectRedirectOperator { found: Option<Token> },
     #[error("expect redirection operand, but found `{found:?}`")]
     ExpectRedirectionOperand { found: Option<Token> },
+    #[error("Unexpected error occured while parsing input")]
+    UnexpectedError
 }
 
 pub(crate) struct Parser {
@@ -77,7 +80,7 @@ impl Parser {
             return Ok(None);
         }
 
-        let ast = self.parse_and_or()?;
+        let ast = self.parse_sequence()?;
 
         // 检查是否存在parser未消费的剩余Token
         if let Some(token) = self.tokens.next() {
@@ -112,7 +115,7 @@ impl Parser {
                     redirections.push(self.parse_redirection()?);
                 }
                 // 当遇到这些说明当前Command已经结束
-                Some(Token::AndAnd) | Some(Token::OrOr) | Some(Token::Pipeline) | None => {
+                Some(Token::AndAnd) | Some(Token::OrOr) | Some(Token::Pipeline) | Some(Token::Semicolon) | None => {
                     break;
                 }
             }
@@ -249,6 +252,39 @@ impl Parser {
         }
 
         Ok(Ast::Pipeline { commands })
+    }
+
+    /// 解析由 `;` 构成的命令序列
+    /// 
+    /// # Returns
+    /// 
+    /// 单条命令返回值取决于 [`Parser::parse_and_or`] 的返回值，多条命令组成的Sequence返回 [`Ast::Seq`]。
+    /// 
+    /// # Errors
+    /// 
+    /// 当 Seq 长度为0时返回 [`ParserError`]
+    fn parse_sequence(&mut self) -> Result<Ast, ParserError> {
+        let first = self.parse_and_or()?;
+        let mut sequence = vec![first];
+        loop {
+            if self.tokens.next_if_eq(&Token::Semicolon).is_some(){
+                // TODO: 对照POSIX文档，检查分号后无命令是否为非法行为
+                sequence.push(self.parse_and_or()?);
+            } else {
+                break;
+            }
+        }
+
+        if sequence.len() > 1 {
+            // 序列中有多个命令
+            Ok(Ast::Seq(sequence))
+        } else if !sequence.is_empty() {
+            // 如果序列中只有一个命令，则不要用Seq封装一层，直接展平
+            Ok(sequence.pop().unwrap())
+        } else {
+            // 理论上 unreachable!
+            Err(ParserError::UnexpectedError)
+        }
     }
 }
 

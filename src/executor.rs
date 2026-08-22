@@ -376,6 +376,18 @@ impl Executor {
                 }
             }
             Ast::Pipeline { commands } => self.execute_pipeline(shell, commands),
+            Ast::Seq(sequence) => {
+                let mut last_status = 0;
+                for item in sequence{
+                    last_status = self.execute_ast(shell, item)?;
+
+                    if shell.exit_requested() {
+                        break;
+                    }
+                }
+
+                Ok(last_status)
+            }
         }
     }
 
