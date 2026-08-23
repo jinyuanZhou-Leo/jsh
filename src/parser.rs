@@ -42,7 +42,7 @@ pub(crate) enum ParserError {
     #[error("expect redirection operand, but found `{found:?}`")]
     ExpectRedirectionOperand { found: Option<Token> },
     #[error("Unexpected error occured while parsing input")]
-    UnexpectedError
+    UnexpectedError,
 }
 
 pub(crate) struct Parser {
@@ -115,7 +115,11 @@ impl Parser {
                     redirections.push(self.parse_redirection()?);
                 }
                 // 当遇到这些说明当前Command已经结束
-                Some(Token::AndAnd) | Some(Token::OrOr) | Some(Token::Pipeline) | Some(Token::Semicolon) | None => {
+                Some(Token::AndAnd)
+                | Some(Token::OrOr)
+                | Some(Token::Pipeline)
+                | Some(Token::Semicolon)
+                | None => {
                     break;
                 }
             }
@@ -255,21 +259,22 @@ impl Parser {
     }
 
     /// 解析由 `;` 构成的命令序列
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// 单条命令返回值取决于 [`Parser::parse_and_or`] 的返回值，多条命令组成的Sequence返回 [`Ast::Seq`]。
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// 当 Seq 长度为0时返回 [`ParserError`]
     fn parse_sequence(&mut self) -> Result<Ast, ParserError> {
         let first = self.parse_and_or()?;
         let mut sequence = vec![first];
         loop {
-            if self.tokens.next_if_eq(&Token::Semicolon).is_some(){
-                // TODO: 对照POSIX文档，检查分号后无命令是否为非法行为
-                sequence.push(self.parse_and_or()?);
+            if self.tokens.next_if_eq(&Token::Semicolon).is_some() {
+                if self.tokens.peek().is_some() {
+                    sequence.push(self.parse_and_or()?);
+                }
             } else {
                 break;
             }

@@ -379,7 +379,13 @@ impl Executor {
             Ast::Seq(sequence) => {
                 let mut last_status = 0;
                 for item in sequence{
-                    last_status = self.execute_ast(shell, item)?;
+                    match self.execute_ast(shell, item){
+                        Ok(status) => last_status = status,
+                        Err(error) => {
+                            eprintln!("Error occurred while executing sequence: `{error}`");
+                            last_status = 3
+                        }
+                    }
 
                     if shell.exit_requested() {
                         break;
