@@ -1,12 +1,18 @@
+mod bg;
 mod cd;
 mod echo;
 mod exit;
+mod fg;
+mod jobs;
 mod pwd;
 mod type_command;
 
+pub(crate) use bg::bg;
 pub(crate) use cd::cd;
 pub(crate) use echo::echo;
 pub(crate) use exit::exit;
+pub(crate) use fg::fg;
+pub(crate) use jobs::jobs;
 pub(crate) use pwd::pwd;
 pub(crate) use type_command::type_command;
 
@@ -116,12 +122,15 @@ impl BuiltinError {
     }
 }
 
-pub(crate) const BUILTINS: [(&str, BuiltinFn); 5] = [
+pub(crate) const BUILTINS: [(&str, BuiltinFn); 8] = [
     ("exit", exit as BuiltinFn),
     ("echo", echo as BuiltinFn),
     ("type", type_command as BuiltinFn),
     ("pwd", pwd as BuiltinFn),
     ("cd", cd as BuiltinFn),
+    ("jobs", jobs as BuiltinFn),
+    ("fg", fg as BuiltinFn),
+    ("bg", bg as BuiltinFn),
 ];
 
 pub(crate) const BUILTIN_CHILD_ARG0: &str = "__jsh_builtin_child_mode__";

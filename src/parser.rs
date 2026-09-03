@@ -1,4 +1,4 @@
-use std::{iter::Peekable, vec::IntoIter};
+use std::{fmt, iter::Peekable, vec::IntoIter};
 
 use thiserror::Error;
 
@@ -25,7 +25,78 @@ pub(crate) enum Ast {
     OrIf { left: Box<Ast>, right: Box<Ast> },
     Seq(Vec<Ast>),
     Pipeline { commands: Vec<Command> },
-    Background { job: Box<Ast> }
+    Background { job: Box<Ast> },
+}
+
+impl fmt::Display for Redirection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let operator = match self.operator {
+            RedirectOperator::Input => "<",
+            RedirectOperator::OutputTruncate => ">",
+            RedirectOperator::OutputAppend => ">>",
+            RedirectOperator::DuplicateOutput => ">&",
+            RedirectOperator::DuplicateInput => "<&",
+        };
+        write!(
+            formatter,
+            "{}{operator}{}",
+            self.redirected_fd, self.operand
+        )
+    }
+}
+
+impl fmt::Display for Command {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut needs_separator = false;
+        for argument in &self.args {
+            if needs_separator {
+                formatter.write_str(" ")?;
+            }
+            write!(formatter, "{argument}")?;
+            needs_separator = true;
+        }
+        for redirection in &self.redirections {
+            if needs_separator {
+                formatter.write_str(" ")?;
+            }
+            write!(formatter, "{redirection}")?;
+            needs_separator = true;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Ast {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Command(command) => write!(formatter, "{command}"),
+            Self::AndIf { left, right } => write!(formatter, "{left} && {right}"),
+            Self::OrIf { left, right } => write!(formatter, "{left} || {right}"),
+            Self::Seq(sequence) => {
+                let mut separator = "";
+                for item in sequence {
+                    formatter.write_str(separator)?;
+                    write!(formatter, "{item}")?;
+                    separator = if matches!(item, Self::Background { .. }) {
+                        " "
+                    } else {
+                        "; "
+                    };
+                }
+                Ok(())
+            }
+            Self::Pipeline { commands } => {
+                for (index, command) in commands.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(" | ")?;
+                    }
+                    write!(formatter, "{command}")?;
+                }
+                Ok(())
+            }
+            Self::Background { job } => write!(formatter, "{job} &"),
+        }
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -274,12 +345,15 @@ impl Parser {
         loop {
             let item = self.parse_and_or()?;
             if self.tokens.next_if_eq(&Token::Semicolon).is_some(){
-                if self.tokens.peek().is_some(){
-                    list.push(item);
+                list.push(item);
+                if self.tokens.peek().is_none(){
+                    break;
                 }
             } else if self.tokens.next_if_eq(&Token::Ampersand).is_some() {
-                list.push(Ast::Background { job: Box::new(item) }); 
-                break;
+                list.push(Ast::Background { job: Box::new(item) });
+                if self.tokens.peek().is_none() {
+                    break;
+                }
             } else {
                 list.push(item); // 即使没有匹配到任何符号,也要先压入list然后再退出, 避免意外丢弃最后一个item
                 break;
@@ -540,5 +614,20 @@ mod tests {
                 }),
             ])))
         );
+    }
+
+    #[test]
+    fn formats_job_text_without_ast_debug_syntax() {
+        let ast = parse("sleep 1 & echo 'done now'")
+            .expect("valid command list should parse")
+            .expect("command list should produce an AST");
+
+        assert_eq!(ast.to_string(), "sleep 1 & echo 'done now'");
+
+        let ast = parse("false && echo \"later\"")
+            .expect("valid AND-OR list should parse")
+            .expect("AND-OR list should produce an AST");
+
+        assert_eq!(ast.to_string(), "false && echo \"later\"");
     }
 }

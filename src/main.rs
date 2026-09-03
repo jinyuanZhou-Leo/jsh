@@ -2,6 +2,7 @@ mod builtin;
 mod executor;
 mod expander;
 mod external;
+mod job_control;
 mod lexer;
 mod parser;
 mod shell;
@@ -14,6 +15,7 @@ use thiserror::Error;
 use crate::{
     builtin::{BUILTIN_CHILD_ARG0, BUILTINS, BuiltinIo},
     executor::{Executor, ExecutorError},
+    job_control::JobControlError,
     lexer::{Lexer, LexerError},
     parser::{Parser, ParserError},
     shell::{ResolvedCommand, Shell},
@@ -39,7 +41,7 @@ fn main() -> Result<(), ReplError> {
 ///
 /// # Errors
 ///
-/// 无法取得当前目录、初始化行编辑器或读取用户输入时返回 [`ReplError`]。
+/// 无法取得当前目录、初始化 Job Control/行编辑器、回收后台状态或读取用户输入时返回 [`ReplError`]。
 fn run_repl() -> Result<(), ReplError> {
     // 读取环境变量
     let env = env::vars().collect();
@@ -49,6 +51,7 @@ fn run_repl() -> Result<(), ReplError> {
         env,
         BUILTINS,
     );
+    shell.initialize_job_control()?;
 
     let mut executor = Executor::new();
 
@@ -75,6 +78,10 @@ fn run_repl() -> Result<(), ReplError> {
     }
 
     while !shell.exit_requested() {
+        for notification in shell.job_control_mut().take_notifications()? {
+            eprintln!("{notification}");
+        }
+
         // 读取用户输入
         let source = match rl.readline("$ ") {
             Ok(source) => {
@@ -110,6 +117,7 @@ fn run_repl() -> Result<(), ReplError> {
         }
     }
 
+    shell.shutdown_job_control();
     Ok(())
 }
 
@@ -140,9 +148,18 @@ fn execute_line(
         return Ok(0);
     };
 
-    Ok(executor.execute(shell, ast)?)
+    Ok(executor.execute_with_source(shell, ast, source)?)
 }
 
+/// 解析当前 Shell 会话使用的历史记录文件路径。
+///
+/// # Arguments
+///
+/// * `shell` - 提供当前目录和 `HISTFILE` 环境变量的 Shell。
+///
+/// # Returns
+///
+/// `HISTFILE` 为空时返回 `None`；显式相对路径基于 Shell 当前目录解析；未设置时返回用户目录下的 `.jsh_history`。
 fn history_file_path(shell: &Shell) -> Option<PathBuf> {
     match shell.env("HISTFILE") {
         Some("") => None,
@@ -217,6 +234,9 @@ pub(crate) enum ReplError {
 
     #[error("failed to save history: {0}")]
     SaveHistory(#[source] ReadlineError),
+
+    #[error(transparent)]
+    JobControl(#[from] JobControlError),
 }
 
 #[derive(Debug, Error)]

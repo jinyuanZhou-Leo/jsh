@@ -1,3 +1,5 @@
+use std::fmt;
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum Token {
     Word(Word),
@@ -64,6 +66,20 @@ impl Word {
     /// 拥有每个 [`WordPart`] 所有权的迭代器。
     pub(crate) fn into_parts(self) -> impl Iterator<Item = WordPart> {
         self.parts.into_iter()
+    }
+}
+
+impl fmt::Display for Word {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for part in &self.parts {
+            match part {
+                WordPart::SingleQuoted(value) => write!(formatter, "'{value}'")?,
+                WordPart::DoubleQuoted(value) => write!(formatter, "\"{value}\"")?,
+                WordPart::Unquoted(value) => formatter.write_str(value)?,
+                WordPart::Escaped(value) => write!(formatter, "\\{value}")?,
+            }
+        }
+        Ok(())
     }
 }
 

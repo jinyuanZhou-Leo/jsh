@@ -8,6 +8,6 @@ rust-version = "1.96"
 [dependencies]
 bytes = "1.3.0"                                  # helps manage buffers
 is_executable = "1.0.6"
-nix = "0.31.3"
+nix = { version = "0.31.3", features = ["fs", "process", "signal", "term"] }
 rustyline = "18.0.1"
 thiserror = "1.0.38"                             # error handling

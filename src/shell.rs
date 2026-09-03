@@ -3,7 +3,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{builtin::BuiltinFn, external::CommandLoader};
+use crate::{
+    builtin::BuiltinFn,
+    external::CommandLoader,
+    job_control::{JobControl, JobControlError},
+};
 
 #[derive(Debug)]
 pub(crate) enum ResolvedCommand {
@@ -19,6 +23,7 @@ pub struct Shell {
     // Builtin commands
     builtin: HashMap<String, BuiltinFn>,
     command_loader: CommandLoader,
+    job_control: JobControl,
     exit_request: Option<i32>,
     last_status: i32,
 }
@@ -46,6 +51,7 @@ impl Shell {
             env,
             builtin: builtin.into_iter().map(|(k, v)| (k.into(), v)).collect(),
             command_loader,
+            job_control: JobControl::new(),
             exit_request: None,
             last_status: 0,
         }
@@ -122,6 +128,68 @@ impl Shell {
 
         // 都不可匹配返回None
         None
+    }
+
+    /// 为顶层 REPL 初始化交互式作业控制。
+    ///
+    /// 当标准输入不是终端时保留非交互模式，不执行终端所有权操作。
+    ///
+    /// # Errors
+    ///
+    /// 检查终端、配置 Shell 进程组/信号或取得控制终端失败时返回错误。
+    pub(crate) fn initialize_job_control(&mut self) -> Result<(), JobControlError> {
+        self.job_control.initialize_interactive()
+    }
+
+    /// 返回作业控制器的只读借用。
+    ///
+    /// # Returns
+    ///
+    /// 当前 Shell 唯一的 [`JobControl`] 实例。
+    pub(crate) fn job_control(&self) -> &JobControl {
+        &self.job_control
+    }
+
+    /// 返回作业控制器的可变借用。
+    ///
+    /// # Returns
+    ///
+    /// 当前 Shell 唯一 Job Control 状态的可变借用。
+    pub(crate) fn job_control_mut(&mut self) -> &mut JobControl {
+        &mut self.job_control
+    }
+
+    /// 创建供后台复合列表使用的隔离 Shell 上下文。
+    ///
+    /// 目录、环境和 builtin 表来自 fork 时的快照，修改不会回写父 Shell。
+    ///
+    /// # Arguments
+    ///
+    /// * `pgid` - 隔离 Shell 及其启动的所有进程所属的作业进程组。
+    ///
+    /// # Returns
+    ///
+    /// 不含父 Shell JobTable 和退出请求的独立 Shell 状态。
+    pub(crate) fn forked_subshell(&self, pgid: nix::unistd::Pid) -> Self {
+        let env = self.env.clone();
+        let mut job_control = JobControl::new();
+        job_control.become_subshell(pgid);
+        Self {
+            current_dir: self.current_dir.clone(),
+            command_loader: CommandLoader::new(&env),
+            env,
+            builtin: self.builtin.clone(),
+            job_control,
+            exit_request: None,
+            last_status: self.last_status,
+        }
+    }
+
+    /// 结束 Shell 管理的后台作业并恢复终端状态。
+    ///
+    /// 清理采用 best-effort 语义，退出路径不会因信号或终端恢复失败而覆盖原始结果。
+    pub(crate) fn shutdown_job_control(&mut self) {
+        self.job_control.shutdown();
     }
 
     /// 记录退出请求及其状态码。
