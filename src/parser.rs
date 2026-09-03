@@ -520,4 +520,23 @@ mod tests {
         assert_eq!(parse("echo ok |"), Err(ParserError::ExpectCommand));
         assert_eq!(parse("echo ok | | next"), Err(ParserError::ExpectCommand));
     }
+
+    #[test]
+    fn parses_background_commands_in_a_sequence() {
+        assert_eq!(
+            parse("sleep 1 & echo done"),
+            Ok(Some(Ast::Seq(vec![
+                Ast::Background {
+                    job: Box::new(Ast::Command(Command {
+                        args: vec![word("sleep"), word("1")],
+                        redirections: vec![],
+                    })),
+                },
+                Ast::Command(Command {
+                    args: vec![word("echo"), word("done")],
+                    redirections: vec![],
+                }),
+            ])))
+        );
+    }
 }

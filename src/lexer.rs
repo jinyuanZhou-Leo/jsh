@@ -695,7 +695,11 @@ mod tests {
         );
         assert_eq!(
             Lexer::new("a & b").lex(),
-            Err(LexerError::UnsupportedOperator("&"))
+            Ok(vec![
+                word(vec![WordPart::Unquoted("a".into())]),
+                Token::Ampersand,
+                word(vec![WordPart::Unquoted("b".into())]),
+            ])
         );
         assert_eq!(
             Lexer::new("cat << input").lex(),
