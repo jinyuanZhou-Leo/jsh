@@ -301,7 +301,7 @@ impl JobControl {
         Self {
             mode: JobControlMode::NonInteractive,
             session: None,
-            jobs: BTreeMap::new(),
+            jobs: BTreeMap::new(), // BTreeMap保证进程组ID有序可查
             next_job_id: 1,
         }
     }
@@ -315,28 +315,40 @@ impl JobControl {
     /// 检查标准输入、打开 `/dev/tty`、配置进程组或信号、读取或转移终端状态失败时返回错误。
     pub(crate) fn initialize_interactive(&mut self) -> Result<(), JobControlError> {
         if !isatty(io::stdin().as_fd()).map_err(JobControlError::InspectStdin)? {
+            // 如果不是tty则直接返回
             return Ok(());
         }
 
+        // 否则打开/dev/tty
         let terminal = OpenOptions::new()
             .read(true)
             .write(true)
             .open("/dev/tty")
             .map_err(JobControlError::OpenTerminal)?;
 
+        // tcgetpgrp -> 获取tty当前前台进程组PGID
+        // getpgrp -> 获取当前shell进程的PGID
+        // 如果二者不相等, 说明当前shell进程组处于后台
+        // 该情况下循环给shell进程组发送SIGTTIN暂停信号, 知道shell进程组重回tty前台
         while tcgetpgrp(&terminal).map_err(JobControlError::Terminal)? != getpgrp() {
             killpg(getpgrp(), Signal::SIGTTIN).map_err(JobControlError::InitializeProcessGroup)?;
         }
 
+        // 添加对于特定信号的处理
         install_shell_signal_dispositions()?;
 
+        // 获取shell PID
         let shell_pid = getpid();
+        // 如果shell所在进程组的PGID不等于shell的进程PID, 则修改其PGID为shell进程的PID
         if getpgrp() != shell_pid {
             setpgid(shell_pid, shell_pid).map_err(JobControlError::InitializeProcessGroup)?;
         }
+        // 将tty前台进程组设置为shell所在进程组
+        // Notes: shell PID同时也是shell PGID
         tcsetpgrp(&terminal, shell_pid).map_err(JobControlError::Terminal)?;
         let shell_terminal_modes = tcgetattr(&terminal).map_err(JobControlError::Terminal)?;
 
+        // 把shell的控制模式设置为Interactive
         self.mode = JobControlMode::Interactive;
         self.session = Some(InteractiveSession {
             terminal,
@@ -952,7 +964,10 @@ impl Drop for JobControl {
 ///
 /// 任一 `sigaction` 调用失败时返回包含具体信号的错误。
 fn install_shell_signal_dispositions() -> Result<(), JobControlError> {
+    // 忽略信号的Signal Action
     let ignore = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
+
+    // 循环为每一个signal添加ignore
     for signal in SHELL_SIGNALS {
         // SAFETY: SIG_IGN is a kernel-defined disposition and does not call Rust code.
         unsafe { sigaction(signal, &ignore) }
