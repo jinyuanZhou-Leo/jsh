@@ -278,7 +278,8 @@ impl Parser {
                     list.push(item);
                 }
             } else if self.tokens.next_if_eq(&Token::Ampersand).is_some() {
-                list.push(Ast::Background { job: Box::new(item) });
+                list.push(Ast::Background { job: Box::new(item) }); 
+                break;
             } else {
                 list.push(item); // 即使没有匹配到任何符号,也要先压入list然后再退出, 避免意外丢弃最后一个item
                 break;
