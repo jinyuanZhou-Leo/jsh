@@ -13,28 +13,21 @@ use rustyline::{Config, error::ReadlineError};
 use thiserror::Error;
 
 use crate::{
-    builtin::{BUILTIN_CHILD_ARG0, BUILTINS, BuiltinIo},
+    builtin::BUILTINS,
     executor::{Executor, ExecutorError},
     job_control::JobControlError,
     lexer::{Lexer, LexerError},
     parser::{Parser, ParserError},
-    shell::{ResolvedCommand, Shell},
+    shell::Shell,
 };
 
-/// 根据进程启动模式运行交互式 Shell 或内建命令子进程。
+/// 运行交互式 Shell。
 ///
 /// # Errors
 ///
 /// 交互模式初始化失败、无法取得当前目录或读取输入失败时返回 [`ReplError`]。
 fn main() -> Result<(), ReplError> {
-    let mut args = env::args();
-
-    if args.next().as_deref() == Some(BUILTIN_CHILD_ARG0) {
-        // 管道中的内建命令通过当前程序的专用子进程模式执行。
-        std::process::exit(run_builtin_child(args));
-    } else {
-        run_repl()
-    }
+    run_repl()
 }
 
 /// 初始化 Shell 会话并持续读取、解析和执行用户输入。
@@ -165,56 +158,6 @@ fn history_file_path(shell: &Shell) -> Option<PathBuf> {
         Some("") => None,
         Some(path) => Some(shell.current_dir().join(path)),
         None => env::home_dir().map(|home_dir| home_dir.join(".jsh_history")),
-    }
-}
-
-/// 在独立子进程中执行一个内建命令。
-///
-/// # Arguments
-///
-/// * `args` - 首项为内建命令名，其余项为命令参数的迭代器。
-///
-/// # Returns
-///
-/// 内建命令状态码；启动参数无效或运行环境初始化失败时返回对应的非零状态码。
-fn run_builtin_child(mut args: impl Iterator<Item = String>) -> i32 {
-    let Some(command_name) = args.next() else {
-        eprintln!("jsh: missing builtin name in child process");
-        return 2;
-    };
-
-    let argv: Vec<_> = args.collect();
-
-    let current_dir = match env::current_dir() {
-        Ok(current_dir) => current_dir,
-        Err(error) => {
-            eprintln!("jsh: failed to get current directory: {error}");
-            return 1;
-        }
-    };
-
-    let mut shell = Shell::new(current_dir, env::vars().collect(), builtin::BUILTINS);
-
-    let builtin = match shell.resolve_command(&command_name) {
-        Some(ResolvedCommand::Builtin(builtin)) => builtin,
-        _ => {
-            eprintln!("jsh: unknown builtin `{command_name}`");
-            return 126;
-        }
-    };
-
-    let mut stdin = std::io::stdin().lock();
-    let mut stdout = std::io::stdout().lock();
-    let mut stderr = std::io::stderr().lock();
-
-    let mut io = BuiltinIo::new(&mut stdin, &mut stdout, &mut stderr);
-
-    match builtin::invoke(builtin, &mut shell, &argv, &mut io) {
-        Ok(status) => status,
-        Err(error) => {
-            eprintln!("jsh: builtin I/O failed: {error}");
-            1
-        }
     }
 }
 

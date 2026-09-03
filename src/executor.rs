@@ -1,7 +1,7 @@
-use std::env;
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
-use std::io::{self, PipeReader, Write};
-use std::os::fd::{AsFd, OwnedFd};
+use std::io::{self, PipeReader, PipeWriter, Read, Write};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -46,6 +46,15 @@ struct CommandIoCtx {
 }
 
 impl CommandIoCtx {
+    /// 返回当前 stage 持有的三个底层文件描述符。
+    fn raw_fds(&self) -> [i32; 3] {
+        [
+            self.stdin.as_raw_fd(),
+            self.stdout.as_raw_fd(),
+            self.stderr.as_raw_fd(),
+        ]
+    }
+
     /// 从当前进程复制标准输入、标准输出和标准错误的文件描述符。
     ///
     /// # Errors
@@ -293,8 +302,11 @@ pub enum ExecutorError {
     UnsupportedFileDescriptor { fd: i32 },
     #[error(transparent)]
     JobControl(#[from] JobControlError),
-    #[error("failed to fork background job: {0}")]
-    ForkBackground(nix::errno::Errno),
+    #[error("failed to fork {kind}: {source}")]
+    Fork {
+        kind: &'static str,
+        source: nix::errno::Errno,
+    },
 }
 
 impl Executor {
@@ -608,42 +620,133 @@ impl Executor {
         process
     }
 
-    /// 构造以当前程序的内建命令子进程模式运行的管道阶段。
+    /// 在 fork 得到的独立 Shell 快照中执行 pipeline builtin。
     ///
     /// # Arguments
     ///
-    /// * `command_name` - 需要执行的内建命令名。
+    /// * `builtin` - 需要执行的内建命令函数。
     /// * `argv` - 不包含命令名的参数列表。
-    /// * `shell` - 提供子进程环境变量的 Shell 上下文。
+    /// * `shell` - fork 时复制其状态的父 Shell。
     /// * `io_ctx` - 移交给子进程的标准输入、标准输出和标准错误。
     ///
     /// # Returns
     ///
-    /// 已配置参数、环境、当前目录和标准流，但尚未启动的 [`ProcessCommand`]。
+    /// 父进程返回 child PID 和启动屏障写端；child 等待 pipeline 全部启动后执行
+    /// builtin，并通过 `_exit` 终止。
     ///
     /// # Errors
     ///
-    /// 无法定位当前可执行文件时返回 [`io::Error`]。
-    fn build_builtin_process(
-        command_name: &str,
+    /// `fork` 失败时返回 [`ExecutorError::Fork`]。
+    fn spawn_builtin_direct(
+        builtin: BuiltinFn,
         argv: &[String],
         shell: &Shell,
-        io_ctx: CommandIoCtx,
-    ) -> io::Result<ProcessCommand> {
-        let executable = env::current_exe()?;
+        mut io_ctx: CommandIoCtx,
+        target_pgid: Option<Pid>,
+        inherited_pipeline_fds: &[i32],
+    ) -> Result<(Pid, PipeWriter), ExecutorError> {
+        let (mut release_reader, release_writer) = io::pipe()?;
+        // SAFETY: jsh is single-threaded. The child restores process state before executing
+        // the builtin against its private Shell snapshot and exits without running destructors.
+        match unsafe { fork() }.map_err(|source| ExecutorError::Fork {
+            kind: "pipeline builtin",
+            source,
+        })? {
+            ForkResult::Parent { child } => Ok((child, release_writer)),
+            ForkResult::Child => {
+                let child_pid = nix::unistd::getpid();
+                drop(release_writer);
+                let status = match shell
+                    .job_control()
+                    .prepare_forked_child(target_pgid, shell.job_control().is_interactive())
+                {
+                    Ok(()) => {
+                        let mut release = [0_u8];
+                        if release_reader.read_exact(&mut release).is_err() {
+                            126
+                        } else {
+                            match Self::install_builtin_standard_fds(&io_ctx) {
+                                Ok(()) => {
+                                    Self::close_forked_builtin_fds(&io_ctx, inherited_pipeline_fds);
+                                    let child_pgid = target_pgid
+                                        .filter(|pgid| pgid.as_raw() != 0)
+                                        .unwrap_or(child_pid);
+                                    let mut child_shell = shell.forked_subshell(child_pgid);
+                                    // SAFETY: the child exclusively owns its standard fds and
+                                    // exits via _exit, so these File wrappers never affect the
+                                    // parent process or run destructors over copied state.
+                                    let mut stdin = unsafe { File::from_raw_fd(Fd::STDIN.0) };
+                                    let mut stdout = unsafe { File::from_raw_fd(Fd::STDOUT.0) };
+                                    let mut stderr = unsafe { File::from_raw_fd(Fd::STDERR.0) };
+                                    let mut io =
+                                        BuiltinIo::new(&mut stdin, &mut stdout, &mut stderr);
+                                    builtin::invoke(builtin, &mut child_shell, argv, &mut io)
+                                        .unwrap_or(1)
+                                }
+                                Err(error) => {
+                                    let _ = writeln!(
+                                        io_ctx.stderr,
+                                        "jsh: failed to install pipeline builtin I/O: {error}"
+                                    );
+                                    126
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = writeln!(
+                            io_ctx.stderr,
+                            "jsh: failed to prepare pipeline builtin: {error}"
+                        );
+                        126
+                    }
+                };
+                // SAFETY: this is the forked builtin process; parent-owned state must not drop.
+                unsafe { nix::libc::_exit(status) }
+            }
+        }
+    }
 
-        let mut process = ProcessCommand::new(executable);
-        process
-            .arg0(builtin::BUILTIN_CHILD_ARG0)
-            .arg(command_name)
-            .args(argv)
-            .env_clear()
-            .envs(shell.environment())
-            .current_dir(shell.current_dir())
-            .stdin(io_ctx.stdin)
-            .stdout(io_ctx.stdout)
-            .stderr(io_ctx.stderr);
-        Ok(process)
+    /// 将 fork-direct builtin 的三路 I/O 安装为 child 的标准文件描述符。
+    ///
+    /// # Arguments
+    ///
+    /// * `io_ctx` - 已应用 pipeline 和重定向设置的 stage I/O。
+    ///
+    /// # Errors
+    ///
+    /// 任一 `dup2` 系统调用失败时返回对应的 I/O 错误。
+    fn install_builtin_standard_fds(io_ctx: &CommandIoCtx) -> io::Result<()> {
+        for (source, destination) in [
+            (&io_ctx.stdin, Fd::STDIN),
+            (&io_ctx.stdout, Fd::STDOUT),
+            (&io_ctx.stderr, Fd::STDERR),
+        ] {
+            // SAFETY: source is an open File and destination is a standard fd in the forked
+            // child. dup2 atomically replaces the destination without changing source.
+            if unsafe { nix::libc::dup2(source.as_raw_fd(), destination.0) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    /// 关闭 fork child 中不再需要的 pipeline 临时文件描述符。
+    ///
+    /// 当前 stage 的 I/O 已复制到 0/1/2；其他 stage 的 pipe/file 以及先前 builtin
+    /// 的 release gate 不属于该 child，必须在 builtin 开始 I/O 前关闭。
+    fn close_forked_builtin_fds(io_ctx: &CommandIoCtx, inherited_pipeline_fds: &[i32]) {
+        for fd in io_ctx
+            .raw_fds()
+            .into_iter()
+            .chain(inherited_pipeline_fds.iter().copied())
+        {
+            if fd > Fd::STDERR.0 {
+                // SAFETY: these descriptors are child-local copies of parent-owned pipeline
+                // resources. The child exits via _exit and must not run their Rust destructors.
+                unsafe { nix::libc::close(fd) };
+            }
+        }
     }
 
     /// 在启动任何进程前完成 pipeline 的展开、pipe 拓扑和重定向准备。
@@ -726,33 +829,55 @@ impl Executor {
         prepared_pipeline: PreparedPipeline,
     ) -> Result<RunningPipeline, ExecutorError> {
         let mut running_pipeline = Vec::with_capacity(prepared_pipeline.len());
+        let mut builtin_release_gates = Vec::new();
+        let mut prepared_pipeline = VecDeque::from(prepared_pipeline);
         let mut pgid = None;
 
-        for job in prepared_pipeline {
-            running_pipeline.push(match job {
-                Stage::Ready(job) => match self.spawn_prepared_job(shell, job, pgid) {
-                    // https://github.com/jinyuanZhou-Leo/jsh/issues/1
-                    // prepared_job 生成失败时终止并回收已经启动的所有阶段。
-                    Ok(stage) => {
-                        if let JobStage::Process(pid) = stage
-                            && pgid.is_none()
-                        {
-                            pgid = Some(shell.job_control().child_group_target(None).map_or(
-                                pid,
-                                |target| {
-                                    if target.as_raw() == 0 { pid } else { target }
-                                },
-                            ));
+        while let Some(job) = prepared_pipeline.pop_front() {
+            let inherited_pipeline_fds: Vec<_> = prepared_pipeline
+                .iter()
+                .filter_map(|stage| match stage {
+                    Stage::Ready(prepared) => Some(prepared.io_ctx.raw_fds()),
+                    Stage::Finished(_) => None,
+                })
+                .flatten()
+                .chain(builtin_release_gates.iter().map(AsRawFd::as_raw_fd))
+                .collect();
+            let (stage, release_gate) = match job {
+                Stage::Ready(job) => {
+                    match self.spawn_prepared_job(shell, job, pgid, &inherited_pipeline_fds) {
+                        // https://github.com/jinyuanZhou-Leo/jsh/issues/1
+                        // prepared_job 生成失败时终止并回收已经启动的所有阶段。
+                        Ok((stage, release_gate)) => {
+                            if let JobStage::Process(pid) = stage
+                                && pgid.is_none()
+                            {
+                                pgid = Some(shell.job_control().child_group_target(None).map_or(
+                                    pid,
+                                    |target| {
+                                        if target.as_raw() == 0 { pid } else { target }
+                                    },
+                                ));
+                            }
+                            (stage, release_gate)
                         }
-                        stage
+                        Err(error) => {
+                            Self::terminate_pipeline(&running_pipeline, pgid);
+                            return Err(error);
+                        }
                     }
-                    Err(error) => {
-                        Self::terminate_pipeline(&running_pipeline, pgid);
-                        return Err(error);
-                    }
-                },
-                Stage::Finished(code) => JobStage::Completed(code),
-            });
+                }
+                Stage::Finished(code) => (JobStage::Completed(code), None),
+            };
+            running_pipeline.push(stage);
+            if let Some(release_gate) = release_gate {
+                builtin_release_gates.push(release_gate);
+            }
+        }
+
+        // A fast builtin must not exit before later stages have joined its process group.
+        for mut release_gate in builtin_release_gates {
+            let _ = release_gate.write_all(&[1]);
         }
 
         Ok(running_pipeline)
@@ -778,64 +903,65 @@ impl Executor {
         shell: &Shell,
         prepared_job: Prepared,
         current_pgid: Option<Pid>,
-    ) -> Result<JobStage, ExecutorError> {
+        inherited_pipeline_fds: &[i32],
+    ) -> Result<(JobStage, Option<PipeWriter>), ExecutorError> {
         let Prepared {
             command_name,
             argv,
             io_ctx,
         } = prepared_job;
 
-        let (mut process, mut logger) = match shell.resolve_command(&command_name) {
-            Some(ResolvedCommand::Builtin(_)) => {
+        let target_pgid = shell.job_control().child_group_target(current_pgid);
+        let (pid, release_gate) = match shell.resolve_command(&command_name) {
+            Some(ResolvedCommand::Builtin(builtin)) => {
+                let (pid, release_gate) = Self::spawn_builtin_direct(
+                    builtin,
+                    &argv,
+                    shell,
+                    io_ctx,
+                    target_pgid,
+                    inherited_pipeline_fds,
+                )?;
+                (pid, Some(release_gate))
+            }
+            Some(ResolvedCommand::External(executable)) => {
                 let mut logger = io_ctx.stderr_writer()?;
-                match Self::build_builtin_process(&command_name, &argv, shell, io_ctx) {
-                    Ok(process) => (process, logger),
+                let mut process =
+                    Self::build_external_process(&executable, &command_name, shell, &argv, io_ctx);
+                shell.job_control().configure_child_command(
+                    &mut process,
+                    target_pgid,
+                    shell.job_control().is_interactive(),
+                );
+                match process.spawn() {
+                    Ok(child) => {
+                        let pid = Pid::from_raw(child.id() as i32);
+                        drop(child);
+                        (pid, None)
+                    }
                     Err(error) => {
-                        writeln!(logger, "{command_name}: failed to execute builtin: {error}",)?;
-                        return Ok(JobStage::Completed(126));
+                        shell.job_control().restore_shell_terminal();
+                        writeln!(logger, "{command_name}: failed to execute: {error}")?;
+                        return Ok((JobStage::Completed(126), None));
                     }
                 }
             }
-            Some(ResolvedCommand::External(executable)) => {
-                let logger = io_ctx.stderr_writer()?;
-                (
-                    Self::build_external_process(&executable, &command_name, shell, &argv, io_ctx),
-                    logger,
-                )
-            }
             None => {
                 writeln!(io_ctx.stderr_writer()?, "{command_name}: not found",)?;
-                return Ok(JobStage::Completed(127));
+                return Ok((JobStage::Completed(127), None));
             }
         };
 
-        let target_pgid = shell.job_control().child_group_target(current_pgid);
-        shell.job_control().configure_child_command(
-            &mut process,
-            target_pgid,
-            shell.job_control().is_interactive(),
-        );
-        match process.spawn() {
-            Ok(child) => {
-                let pid = Pid::from_raw(child.id() as i32);
-                drop(child);
-                if let Err(error) = shell
-                    .job_control()
-                    .confirm_child_process_group(pid, target_pgid)
-                {
-                    let _ = kill(pid, Signal::SIGTERM);
-                    let _ = waitpid(pid, None);
-                    shell.job_control().restore_shell_terminal();
-                    return Err(error.into());
-                }
-                Ok(JobStage::Process(pid))
-            }
-            Err(error) => {
-                shell.job_control().restore_shell_terminal();
-                writeln!(logger, "{command_name}: failed to execute: {error}")?;
-                Ok(JobStage::Completed(126))
-            }
+        if let Err(error) = shell
+            .job_control()
+            .confirm_child_process_group(pid, target_pgid)
+        {
+            let _ = kill(pid, Signal::SIGTERM);
+            let _ = waitpid(pid, None);
+            shell.job_control().restore_shell_terminal();
+            return Err(error.into());
         }
+        Ok((JobStage::Process(pid), release_gate))
     }
 
     /// 在 pipeline 启动中途失败时终止并同步回收已经启动的阶段。
@@ -933,7 +1059,10 @@ impl Executor {
     ) -> Result<i32, ExecutorError> {
         // SAFETY: jsh does not create application threads. The child immediately resets its
         // signal state, isolates mutable Shell state, executes the AST, and exits via _exit.
-        match unsafe { fork() }.map_err(ExecutorError::ForkBackground)? {
+        match unsafe { fork() }.map_err(|source| ExecutorError::Fork {
+            kind: "background job",
+            source,
+        })? {
             ForkResult::Parent { child } => {
                 let pgid = match shell
                     .job_control()

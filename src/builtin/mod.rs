@@ -133,8 +133,6 @@ pub(crate) const BUILTINS: [(&str, BuiltinFn); 8] = [
     ("bg", bg as BuiltinFn),
 ];
 
-pub(crate) const BUILTIN_CHILD_ARG0: &str = "__jsh_builtin_child_mode__";
-
 /// 调用内建命令，并将业务错误写入该命令重定向后的标准错误。
 ///
 /// # Arguments

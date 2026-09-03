@@ -257,6 +257,14 @@ enum JobControlMode {
     Subshell { pgid: Pid },
 }
 
+/// Describe this struct.
+///
+/// # Fields
+///
+/// - `mode` (`JobControlMode`) - 控制模式.
+/// - `session` (`Option<InteractiveSession>`) - Interactive Session, 仅在Interactive模式中存在.
+/// - `jobs` (`BTreeMap<JobId`) - 使用BTree存储的Job Table.
+/// - `next_job_id` (`u32`) - Describe this field.
 #[derive(Debug)]
 pub(crate) struct JobControl {
     mode: JobControlMode,
@@ -379,7 +387,12 @@ impl JobControl {
     ///
     /// 建立进程组、恢复默认信号 disposition 或清空信号 mask 失败时返回错误。
     pub(crate) fn prepare_subshell_process(pgid: Pid) -> Result<(), JobControlError> {
+        // 把当前子shell加入指定 PGID 的进程组
+        // setpgid() 中 Pid::from_raw(0) 表示 当前进程的 PID
         setpgid(Pid::from_raw(0), pgid).map_err(JobControlError::InitializeProcessGroup)?;
+
+        // 父shell为了保护自己, 忽略了部分信号的处理, 但是子shell需要对这些信号正常处理
+        // 故此处reset一下信号处理
         reset_child_signal_state().map_err(|source| JobControlError::ConfigureSignal {
             signal: Signal::SIGCHLD,
             source,
@@ -453,26 +466,35 @@ impl JobControl {
         // syscalls. All captured values are plain integers and no allocation is performed.
         unsafe {
             command.pre_exec(move || {
-                let child_pid = getpid();
-                let child_pgid = if pgid_raw == 0 {
-                    child_pid
-                } else {
-                    Pid::from_raw(pgid_raw)
-                };
-                setpgid(Pid::from_raw(0), child_pgid).map_err(errno_to_io)?;
-
-                if let Some(terminal_raw) = terminal_raw {
-                    // SAFETY: the descriptor belongs to the inherited /dev/tty File and is
-                    // valid until exec closes it.
-                    let terminal = BorrowedFd::borrow_raw(terminal_raw);
-                    tcsetpgrp(terminal, child_pgid).map_err(errno_to_io)?;
-                }
-                // tcsetpgrp must run while the child still inherits the Shell's ignored
-                // SIGTTOU disposition; restoring SIGTTOU first would stop the child in pre_exec.
-                reset_child_signal_state().map_err(errno_to_io)?;
-                Ok(())
+                prepare_child_process(pgid_raw, terminal_raw).map_err(errno_to_io)
             });
         }
+    }
+
+    /// 在显式 `fork` 得到的 child 中建立进程组、转移终端并恢复信号语义。
+    ///
+    /// # Arguments
+    ///
+    /// * `target_pgid` - child 的目标 PGID；PID 0 表示使用 child 自身 PID。
+    /// * `foreground` - 是否在恢复默认信号前把控制终端交给该进程组。
+    ///
+    /// # Errors
+    ///
+    /// 建立进程组、转移终端或恢复 child 信号状态失败时返回底层 errno。
+    pub(crate) fn prepare_forked_child(
+        &self,
+        target_pgid: Option<Pid>,
+        foreground: bool,
+    ) -> Result<(), Errno> {
+        let Some(target_pgid) = target_pgid else {
+            return Ok(());
+        };
+        let terminal_raw = self
+            .session
+            .as_ref()
+            .filter(|_| foreground)
+            .map(|session| session.terminal.as_raw_fd());
+        prepare_child_process(target_pgid.as_raw(), terminal_raw)
     }
 
     /// 在父进程侧确认子进程已经加入目标进程组，消除父子调度竞态。
@@ -987,6 +1009,9 @@ fn reset_child_signal_state() -> nix::Result<()> {
         // SAFETY: SIG_DFL is a kernel-defined disposition and does not call Rust code.
         unsafe { sigaction(signal, &default)? };
     }
+
+    // 此函数逻辑与 `install_shell_signal_disposition` 类似, 但是子shell需要额外接触父shell可能存在的signal mask
+    // 故此处使用 Some(&SigSet::empty()) 来替换Mask
     sigprocmask(SigmaskHow::SIG_SETMASK, Some(&SigSet::empty()), None)
 }
 
@@ -1022,6 +1047,35 @@ fn wait_status_pid(status: &WaitStatus) -> Option<Pid> {
 /// 保留相同原始 OS 错误码的 I/O 错误。
 fn errno_to_io(error: Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
+}
+
+/// 完成 fork child 在执行 builtin 或 `exec` 前共享的进程设置。
+///
+/// # Arguments
+///
+/// * `pgid_raw` - 目标 PGID；0 表示使用当前 child PID。
+/// * `terminal_raw` - 需要转交给 child 进程组的控制终端 fd。
+///
+/// # Errors
+///
+/// 设置进程组、控制终端或信号状态失败时返回底层 errno。
+fn prepare_child_process(pgid_raw: i32, terminal_raw: Option<i32>) -> Result<(), Errno> {
+    let child_pid = getpid();
+    let child_pgid = if pgid_raw == 0 {
+        child_pid
+    } else {
+        Pid::from_raw(pgid_raw)
+    };
+    setpgid(Pid::from_raw(0), child_pgid)?;
+
+    if let Some(terminal_raw) = terminal_raw {
+        // SAFETY: the descriptor belongs to the inherited /dev/tty File and remains valid
+        // throughout child setup.
+        let terminal = unsafe { BorrowedFd::borrow_raw(terminal_raw) };
+        tcsetpgrp(terminal, child_pgid)?;
+    }
+    // Keep SIGTTOU ignored until the terminal belongs to the child process group.
+    reset_child_signal_state()
 }
 
 #[cfg(test)]
