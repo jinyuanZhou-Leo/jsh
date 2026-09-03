@@ -120,6 +120,7 @@ impl Parser {
                 | Some(Token::OrOr)
                 | Some(Token::Pipeline)
                 | Some(Token::Semicolon)
+                | Some(Token::Ampersand)
                 | None => {
                     break;
                 }
