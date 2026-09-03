@@ -142,8 +142,7 @@ impl<'src> Lexer<'src> {
                     // AndAnd
                     self.emit_control_operator(Token::AndAnd);
                 } else {
-                    // TODO: Background
-                    return Err(LexerError::UnsupportedOperator("&"));
+                    self.emit_control_operator(Token::Ampersand);
                 }
             }
             '|' => {

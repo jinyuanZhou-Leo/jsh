@@ -3,11 +3,11 @@ pub(crate) enum Token {
     Word(Word),
     Redirect(RedirectOperator),
     IoNumber(i32),
-    // &&
-    AndAnd,
+    AndAnd,// &&
     OrOr,
     Pipeline,
     Semicolon,
+    Ampersand,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

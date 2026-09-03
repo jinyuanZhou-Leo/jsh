@@ -25,6 +25,7 @@ pub(crate) enum Ast {
     OrIf { left: Box<Ast>, right: Box<Ast> },
     Seq(Vec<Ast>),
     Pipeline { commands: Vec<Command> },
+    Background { job: Box<Ast> }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -80,7 +81,7 @@ impl Parser {
             return Ok(None);
         }
 
-        let ast = self.parse_sequence()?;
+        let ast = self.parse_list()?;
 
         // 检查是否存在parser未消费的剩余Token
         if let Some(token) = self.tokens.next() {
@@ -258,37 +259,35 @@ impl Parser {
         Ok(Ast::Pipeline { commands })
     }
 
-    /// 解析由 `;` 构成的命令序列
+    /// 解析由 `;` 构成的命令序列, 同时解析处理后台任务
     ///
     /// # Returns
     ///
     /// 单条命令返回值取决于 [`Parser::parse_and_or`] 的返回值，多条命令组成的Sequence返回 [`Ast::Seq`]。
     ///
-    /// # Errors
+    /// # panicks
     ///
-    /// 当 Seq 长度为0时返回 [`ParserError`]
-    fn parse_sequence(&mut self) -> Result<Ast, ParserError> {
-        let first = self.parse_and_or()?;
-        let mut sequence = vec![first];
+    /// 当 Seq 长度为0时panic
+    fn parse_list(&mut self) -> Result<Ast, ParserError> {
+        let mut list = Vec::new();
         loop {
-            if self.tokens.next_if_eq(&Token::Semicolon).is_some() {
-                if self.tokens.peek().is_some() {
-                    sequence.push(self.parse_and_or()?);
+            let item = self.parse_and_or()?;
+            if self.tokens.next_if_eq(&Token::Semicolon).is_some(){
+                if self.tokens.peek().is_some(){
+                    list.push(item);
                 }
+            } else if self.tokens.next_if_eq(&Token::Ampersand).is_some() {
+                list.push(Ast::Background { job: Box::new(item) });
             } else {
+                list.push(item); // 即使没有匹配到任何符号,也要先压入list然后再退出, 避免意外丢弃最后一个item
                 break;
             }
         }
 
-        if sequence.len() > 1 {
-            // 序列中有多个命令
-            Ok(Ast::Seq(sequence))
-        } else if !sequence.is_empty() {
-            // 如果序列中只有一个命令，则不要用Seq封装一层，直接展平
-            Ok(sequence.pop().unwrap())
+        if list.len() == 1 {
+            Ok(list.pop().expect("list contains exactly one item"))
         } else {
-            // 理论上 unreachable!
-            Err(ParserError::UnexpectedError)
+            Ok(Ast::Seq(list))
         }
     }
 }
