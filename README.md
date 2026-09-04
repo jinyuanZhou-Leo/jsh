@@ -1,6 +1,6 @@
 # jsh
 
-一个使用 Rust 编写的交互式 shell 学习项目，基于 [CodeCrafters Build Your Own Shell](https://app.codecrafters.io/courses/shell/overview) 实现。
+一个使用 Rust 编写的交互式 shell 学习项目，参考 [CodeCrafters Build Your Own Shell](https://app.codecrafters.io/courses/shell/overview) 中的步骤实现。
 
 [中文](README.md) | [English](README.en.md)
 
