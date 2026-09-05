@@ -8,7 +8,7 @@ An interactive shell learning project written in Rust, implemented through [Code
 
 - Interactive REPL with a `$ ` prompt
 - Persistent command history in `~/.jsh_history` (up to 1000 entries; leading-space and duplicate lines are ignored); set `HISTFILE` to choose another path, or an empty value to disable persistence
-- Built-in commands: `cd`, `echo`, `exit`, `pwd`, and `type`
+- Built-in commands: `cd`, `echo`, `exit`, `pwd`, `type`, `jobs`, `fg`, and `bg`
 - External command lookup through `PATH`; names containing `/` (such as `./script` or `/bin/ls`) are resolved directly, and relative paths plus relative `PATH` directories use the shell's logical current directory rather than the process current directory
 - Single quotes, double quotes, and backslash escapes
 - Tilde expansion, such as `~/notes`
@@ -17,6 +17,8 @@ An interactive shell learning project written in Rust, implemented through [Code
 - Short-circuit execution with `&&` and `||`, with pipelines binding more tightly than conditionals
 - Foreground pipelines connected with `|`, with both built-ins and external commands supported as stages
 - All pipeline stages are started before waiting, and the final stage determines the pipeline status
+- Background jobs started with `&`, managed with `jobs`, `fg`, and `bg`
+- Job stopping, continuation, foreground/background switching, process groups, and terminal control
 - Command-local redirections override the default input or output of their pipeline stage
 - Consistent redirection and exit-status handling for built-ins and external commands
 
@@ -57,7 +59,7 @@ The main implementation is under `src/`:
 
 ## Requirements
 
-- Rust 1.96 or newer
+- Rust 1.88 or newer
 - A Unix-like operating system (the project relies on Unix process and file-descriptor semantics)
 
 ## Quick start
@@ -89,6 +91,9 @@ $ false && echo "this will not run"
 $ false || echo "the previous command failed"
 $ echo "hello from builtin" | cat
 $ printf 'pipeline output\n' | cat > pipeline.txt
+$ sleep 10 &
+$ jobs
+$ fg %1
 $ exit
 ```
 
@@ -104,12 +109,11 @@ cargo fmt --check
 
 The following features are not implemented or are not fully implemented yet:
 
-- Background execution: `&`
-- Full job control, process groups, and `pipefail`
+- `pipefail`
 - Here-documents: `<<`
 - Environment-variable expansion, such as `$HOME`
 - Filename expansion (globbing)
-- Command substitution, semicolon-separated commands, and more complex shell control structures
+- Command substitution and more complex shell control structures
 
 ## License
 
