@@ -21,6 +21,7 @@ use nix::{
 };
 use thiserror::Error;
 
+/// 需要特殊处理的几种信号
 const SHELL_SIGNALS: [Signal; 5] = [
     Signal::SIGINT,
     Signal::SIGQUIT,
@@ -29,6 +30,7 @@ const SHELL_SIGNALS: [Signal; 5] = [
     Signal::SIGTTOU,
 ];
 
+/// 供用户查看的 Job 编号
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct JobId(u32);
 
@@ -106,12 +108,7 @@ impl Job {
     /// # Returns
     ///
     /// 根据初始阶段聚合出状态的新作业记录。
-    fn new(
-        id: JobId,
-        pgid: Pid,
-        command_text: String,
-        stages: Vec<JobStage>,
-    ) -> Self {
+    fn new(id: JobId, pgid: Pid, command_text: String, stages: Vec<JobStage>) -> Self {
         let mut job = Self {
             id,
             pgid,
@@ -121,6 +118,8 @@ impl Job {
             terminal_modes: None,
             notified: false,
         };
+
+        // 如果出现所有RuntimeStage都为Complete的情况, 则通过计算可以直接修改job的状态为Done
         job.recompute_state();
         job
     }
@@ -170,6 +169,9 @@ impl Job {
         let Some(pid) = wait_status_pid(&status) else {
             return false;
         };
+
+        // 提取与事件pid匹配的ProcessRecord
+        // 提取不到返回false
         let Some(process) = self.stages.iter_mut().find_map(|stage| match stage {
             RuntimeStage::Process(process) if process.pid == pid => Some(process),
             RuntimeStage::Process(_) | RuntimeStage::Completed(_) => None,
@@ -182,11 +184,16 @@ impl Job {
             WaitStatus::Signaled(_, signal, _) => ProcessState::Completed(128 + signal as i32),
             WaitStatus::Stopped(_, signal) => ProcessState::Stopped(signal),
             WaitStatus::Continued(_) => ProcessState::Running,
+            // 状态没有发生变化, 返回false
             WaitStatus::StillAlive => return false,
             #[cfg(any(target_os = "linux", target_os = "android"))]
             WaitStatus::PtraceEvent(_, _, _) | WaitStatus::PtraceSyscall(_) => return false,
         };
+
+        // 进程状态刚刚发生了变化, 还没有通知用户, 故设置为false
         self.notified = false;
+
+        // 更新了内部Stage的状态, 故重算整体Job状态
         self.recompute_state();
         true
     }
@@ -197,6 +204,7 @@ impl Job {
     ///
     /// 正常退出使用原始退出码；信号终止或停止使用 `128 + signal`；仍在运行时返回 0。
     fn status_code(&self) -> i32 {
+        // 一个Job的退出状态码只和最后一个作业阶段有关系, 所以只取stages.last()
         match self.stages.last() {
             Some(RuntimeStage::Completed(status)) => *status,
             Some(RuntimeStage::Process(ProcessRecord {
@@ -224,7 +232,10 @@ impl Job {
                 process.state = ProcessState::Running;
             }
         }
+        // 至少有一个进程被设置为了Running, 整个作业的状态必然为Running, 无需recompute
         self.state = JobState::Running;
+
+        // 进程状态刚刚发生了变化, 还没有通知用户, 故设置为false
         self.notified = false;
     }
 
@@ -307,6 +318,7 @@ impl JobControl {
     /// 作业表为空、下一个 JobId 为 1 的非交互控制器。
     pub(crate) fn new() -> Self {
         Self {
+            // 作业控制器实例在创建的时候, 还没有检查标准输入, shell进程组状态, 不能是否可以进入Interactive模式, 故此处初始化保守的选择 Non-interactive
             mode: JobControlMode::NonInteractive,
             session: None,
             jobs: BTreeMap::new(), // BTreeMap保证进程组ID有序可查
@@ -337,7 +349,7 @@ impl JobControl {
         // tcgetpgrp -> 获取tty当前前台进程组PGID
         // getpgrp -> 获取当前shell进程的PGID
         // 如果二者不相等, 说明当前shell进程组处于后台
-        // 该情况下循环给shell进程组发送SIGTTIN暂停信号, 知道shell进程组重回tty前台
+        // 该情况下循环给shell进程组发送SIGTTIN暂停信号, 直到shell进程组重回tty前台
         while tcgetpgrp(&terminal).map_err(JobControlError::Terminal)? != getpgrp() {
             killpg(getpgrp(), Signal::SIGTTIN).map_err(JobControlError::InitializeProcessGroup)?;
         }
@@ -459,6 +471,7 @@ impl JobControl {
         let terminal_raw = self
             .session
             .as_ref()
+            // 如果没有session则不处理, 因为只有交互模式下才有合法的终端fd
             .filter(|_| foreground)
             .map(|session| session.terminal.as_raw_fd());
 
@@ -549,7 +562,7 @@ impl JobControl {
         stages: Vec<JobStage>,
     ) -> JobId {
         let id = JobId(self.next_job_id);
-        self.next_job_id = self.next_job_id.saturating_add(1);
+        self.next_job_id = self.next_job_id.saturating_add(1); // 使用saturating_add防止整数溢出
         self.jobs
             .insert(id, Job::new(id, pgid, command_text, stages));
         id
@@ -830,6 +843,7 @@ impl JobControl {
         if continue_stopped {
             // Continue before transferring the terminal. If SIGCONT fails, the Shell still
             // owns the terminal and can safely report the error and accept the next command.
+            // 尝试让job重新开始运行
             killpg(job.pgid, Signal::SIGCONT)
                 .map_err(|source| JobControlError::SignalJob { job_id, source })?;
             job.mark_running();
@@ -838,6 +852,7 @@ impl JobControl {
         if let Some(session) = &self.session {
             tcsetpgrp(&session.terminal, job.pgid).map_err(JobControlError::Terminal)?;
             if let Some(terminal_modes) = &job.terminal_modes {
+                // 设置该任务的终端模式
                 tcsetattr(&session.terminal, SetArg::TCSADRAIN, terminal_modes)
                     .map_err(JobControlError::Terminal)?;
             }
