@@ -790,11 +790,13 @@ impl JobControl {
         for (pgid, state) in active {
             let _ = killpg(pgid, Signal::SIGHUP);
             if state == JobState::Stopped {
+                // 停止的任务要先继续执行才能正确处理SIGHUP信号
                 let _ = killpg(pgid, Signal::SIGCONT);
             }
         }
         let _ = self.reap_nonblocking();
         if let Some(session) = &self.session {
+            // 恢复Terminal模式, 并将shell设置为tty前台进程
             let _ = tcsetpgrp(&session.terminal, session.shell_pgid);
             let _ = tcsetattr(
                 &session.terminal,
@@ -886,6 +888,8 @@ impl JobControl {
             }
 
             let flags = WaitPidFlag::WUNTRACED | WaitPidFlag::WCONTINUED;
+
+            // 在Unix中, pid<0表示等待pgid为abs(pid)的任意子进程, 只有这样才能wait pipeline全部步骤
             match waitpid(Pid::from_raw(-pgid.as_raw()), Some(flags)) {
                 Ok(status) => self.apply_wait_status(status),
                 Err(Errno::EINTR) => continue,
@@ -953,13 +957,16 @@ impl JobControl {
         stopped_only: bool,
     ) -> Result<JobId, JobControlError> {
         if let Some(specification) = specification {
+            // 去除前导 %
             let digits = specification
                 .strip_prefix('%')
                 .ok_or_else(|| JobControlError::InvalidJobSpec(specification.to_owned()))?;
+            // 转换为u32类型, 然后转换为JobId type
             let id = digits
                 .parse::<u32>()
                 .map(JobId)
                 .map_err(|_| JobControlError::InvalidJobSpec(specification.to_owned()))?;
+            // 如果JobTable中存在该Job, 则返回Some(JobId), 否则返回None
             return self
                 .jobs
                 .contains_key(&id)
@@ -967,6 +974,7 @@ impl JobControl {
                 .ok_or(JobControlError::UnknownJob(id));
         }
 
+        // 如果用户没有给出specification, 则选择JobId最大的
         self.jobs
             .iter()
             .rev()
@@ -1025,7 +1033,7 @@ fn reset_child_signal_state() -> nix::Result<()> {
         unsafe { sigaction(signal, &default)? };
     }
 
-    // 此函数逻辑与 `install_shell_signal_disposition` 类似, 但是子shell需要额外接触父shell可能存在的signal mask
+    // 此函数逻辑与 `install_shell_signal_disposition` 类似, 但是子shell需要额外解除父shell可能存在的signal mask
     // 故此处使用 Some(&SigSet::empty()) 来替换Mask
     sigprocmask(SigmaskHow::SIG_SETMASK, Some(&SigSet::empty()), None)
 }
