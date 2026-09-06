@@ -39,7 +39,8 @@ Expander ──> 展开的命令
   ▼
 Executor ──> 条件执行 / 管道 / 单条命令
                          │
-                         └──> 内建命令 / 外部程序
+                         ├──> 内建命令 / 外部程序
+                         └──> 作业控制 / 进程组
 ```
 
 核心源码位于 `src/`：
@@ -48,11 +49,13 @@ Executor ──> 条件执行 / 管道 / 单条命令
 | --- | --- |
 | `main.rs` | REPL 和错误边界 |
 | `lexer.rs` | 将输入文本切分为 token |
+| `token.rs` | 定义词法分析输出的 token 类型 |
 | `parser.rs` | 将 token 解析为命令 AST |
 | `expander.rs` | 处理单词和路径展开 |
 | `executor.rs` | 处理条件执行、管道、重定向和命令分派 |
 | `executor/tests.rs` | Executor 单元测试 |
 | `shell.rs` | 保存当前目录、环境变量和命令解析状态 |
+| `job_control.rs` | 管理作业、进程组以及前后台切换 |
 | `builtin/` | 内建命令实现 |
 | `external.rs` | 按逻辑当前目录解析带路径的命令，并在 `PATH` 中查找可执行文件 |
 | `tests/` | 真实程序进程的集成测试 |
@@ -114,7 +117,3 @@ cargo fmt --check
 - 环境变量展开，例如 `$HOME`
 - 通配符展开（globbing）
 - 命令替换和更复杂的 shell 控制结构
-
-## 许可证
-
-当前仓库未声明许可证。如需公开分发，请先补充合适的许可证文件。

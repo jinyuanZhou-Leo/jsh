@@ -39,7 +39,8 @@ Expander ──> Expanded command
   ▼
 Executor ──> Conditional / pipeline / simple command
                                   │
-                                  └──> Built-in / external command
+                                  ├──> Built-in / external command
+                                  └──> Job control / process groups
 ```
 
 The main implementation is under `src/`:
@@ -48,11 +49,13 @@ The main implementation is under `src/`:
 | --- | --- |
 | `main.rs` | REPL and error boundaries |
 | `lexer.rs` | Converts source text into tokens |
+| `token.rs` | Defines the token types produced by the lexer |
 | `parser.rs` | Converts tokens into a command AST |
 | `expander.rs` | Expands words and paths |
 | `executor.rs` | Handles conditionals, pipelines, redirections, and command dispatch |
 | `executor/tests.rs` | Executor unit tests |
 | `shell.rs` | Stores the current directory, environment, and command state |
+| `job_control.rs` | Manages jobs, process groups, and foreground/background switching |
 | `builtin/` | Built-in command implementations |
 | `external.rs` | Resolves path-qualified commands against the logical current directory and finds executables through `PATH` |
 | `tests/` | Integration tests that run the real shell process |
@@ -114,7 +117,3 @@ The following features are not implemented or are not fully implemented yet:
 - Environment-variable expansion, such as `$HOME`
 - Filename expansion (globbing)
 - Command substitution and more complex shell control structures
-
-## License
-
-The repository currently does not declare a license. Add an appropriate license file before distributing it publicly.
